@@ -295,86 +295,107 @@ export async function evaluateVaultRisk(vaultData: VaultRiskRequest) {
       reasons.push("Sin advertencias del sistema");
     }
 
-    // Factor 1: TVL del vault (0-20 puntos) - Más granular pero menos penalización
+    // Factor 1: TVL del vault (CRÍTICO - sin liquidez = ALTO RIESGO)
+    // TVL muy bajo significa que no hay liquidez para retirar fondos = RIESGO CRÍTICO
     if (vaultTVL > 100000000) {
       // > $100M
-      score += 20;
-      factors.vaultTVL = 20;
+      score += 10;
+      factors.vaultTVL = 10;
       reasons.push("TVL muy alto (>$100M)");
     } else if (vaultTVL > 50000000) {
       // > $50M
-      score += 18;
-      factors.vaultTVL = 18;
+      score += 8;
+      factors.vaultTVL = 8;
       reasons.push("TVL alto (>$50M)");
     } else if (vaultTVL > 10000000) {
       // > $10M
-      score += 15;
-      factors.vaultTVL = 15;
+      score += 6;
+      factors.vaultTVL = 6;
       reasons.push("TVL moderado-alto (>$10M)");
     } else if (vaultTVL > 1000000) {
       // > $1M
-      score += 12;
-      factors.vaultTVL = 12;
+      score += 4;
+      factors.vaultTVL = 4;
       reasons.push("TVL moderado (>$1M)");
     } else if (vaultTVL > 100000) {
       // > $100K
-      score += 8;
-      factors.vaultTVL = 8;
-      reasons.push("TVL bajo (>$100K)");
-    } else if (vaultTVL > 10000) {
-      // > $10K
-      score += 5;
-      factors.vaultTVL = 5;
-      reasons.push("TVL muy bajo (>$10K)");
-    } else if (vaultTVL > 0) {
       score += 2;
       factors.vaultTVL = 2;
-      reasons.push("TVL mínimo");
+      reasons.push("TVL bajo (>$100K)");
+    } else if (vaultTVL > 10000) {
+      // > $10K - TVL muy bajo, riesgo de falta de liquidez
+      score -= 10;
+      factors.vaultTVL = -10;
+      reasons.push("⚠️ TVL muy bajo (>$10K) - Riesgo de falta de liquidez");
+    } else if (vaultTVL > 1000) {
+      // > $1K - TVL extremadamente bajo
+      score -= 20;
+      factors.vaultTVL = -20;
+      reasons.push("🚨 TVL extremadamente bajo (>$1K) - ALTO RIESGO de falta de liquidez");
+    } else if (vaultTVL > 0) {
+      // < $1K - ULTRA RIESGOSO: Sin liquidez práctica, imposible retirar
+      score -= 50;
+      factors.vaultTVL = -50;
+      reasons.push("🚨🚨 TVL ULTRA BAJO (<$1K) - ULTRA RIESGOSO: SIN LIQUIDEZ, IMPOSIBLE RETIRAR FONDOS");
     } else {
-      // No penalizar tanto si no hay TVL - puede ser un vault nuevo
-      factors.vaultTVL = 0;
-      reasons.push("TVL no disponible (vault nuevo?)");
+      // Sin TVL - puede ser nuevo pero también puede ser un scam
+      score -= 25;
+      factors.vaultTVL = -25;
+      reasons.push("⚠️ TVL no disponible - Vault nuevo o sin liquidez (riesgo alto)");
     }
 
-    // Factor 2: Caída de TVL en las últimas horas (0-20 puntos, negativo si hay caída)
+    // Factor 2: Volatilidad/Caída de TVL en las últimas horas (0-30 puntos) - MÁS IMPORTANTE
+    // Este es el factor más determinante porque indica problemas reales
     if (tvlHistory.length >= 2) {
-      if (tvlDropPercentage > 20) {
-        // Caída > 20% es muy preocupante
-        score -= 20;
-        factors.tvlDrop = -20;
-        reasons.push(`Caída crítica de TVL: ${tvlDropPercentage.toFixed(1)}%`);
+      if (tvlDropPercentage > 30) {
+        // Caída > 30% es MUY preocupante - señal de rug pull o problema grave
+        score -= 30;
+        factors.tvlDrop = -30;
+        reasons.push(`🚨 Caída CRÍTICA de TVL: ${tvlDropPercentage.toFixed(1)}% (ALERTA)`);
+      } else if (tvlDropPercentage > 20) {
+        // Caída 20-30% es muy preocupante
+        score -= 25;
+        factors.tvlDrop = -25;
+        reasons.push(`⚠️ Caída severa de TVL: ${tvlDropPercentage.toFixed(1)}%`);
       } else if (tvlDropPercentage > 10) {
         // Caída 10-20% es preocupante
-        score -= 15;
-        factors.tvlDrop = -15;
-        reasons.push(`Caída significativa de TVL: ${tvlDropPercentage.toFixed(1)}%`);
+        score -= 20;
+        factors.tvlDrop = -20;
+        reasons.push(`⚠️ Caída significativa de TVL: ${tvlDropPercentage.toFixed(1)}%`);
       } else if (tvlDropPercentage > 5) {
-        // Caída 5-10% es moderada
-        score -= 10;
-        factors.tvlDrop = -10;
+        // Caída 5-10% es moderada pero preocupante
+        score -= 12;
+        factors.tvlDrop = -12;
         reasons.push(`Caída moderada de TVL: ${tvlDropPercentage.toFixed(1)}%`);
       } else if (tvlDropPercentage > 0) {
         // Caída pequeña
         score -= 5;
         factors.tvlDrop = -5;
         reasons.push(`Ligera caída de TVL: ${tvlDropPercentage.toFixed(1)}%`);
+      } else if (tvlDropPercentage < -10) {
+        // Crecimiento > 10% es muy positivo
+        score += 15;
+        factors.tvlDrop = 15;
+        reasons.push(`✅ Crecimiento fuerte de TVL: ${Math.abs(tvlDropPercentage).toFixed(1)}%`);
       } else if (tvlDropPercentage < -5) {
-        // Crecimiento > 5% es positivo
+        // Crecimiento 5-10% es positivo
         score += 10;
         factors.tvlDrop = 10;
-        reasons.push(`Crecimiento de TVL: ${Math.abs(tvlDropPercentage).toFixed(1)}%`);
+        reasons.push(`✅ Crecimiento de TVL: ${Math.abs(tvlDropPercentage).toFixed(1)}%`);
       } else {
-        // Estable
-        score += 5;
-        factors.tvlDrop = 5;
-        reasons.push("TVL estable");
+        // Estable (variación < 5%)
+        score += 8;
+        factors.tvlDrop = 8;
+        reasons.push("TVL estable (buena señal)");
       }
     } else {
-      // Sin historial suficiente
+      // Sin historial suficiente - no penalizar pero tampoco bonificar mucho
       factors.tvlDrop = 0;
+      reasons.push("Historial de TVL insuficiente");
     }
 
-    // Factor 3: Variabilidad del TVL (0-10 puntos)
+    // Factor 3: Variabilidad del TVL (0-15 puntos) - Más importante que antes
+    // La volatilidad es un indicador clave de riesgo
     if (tvlHistory.length >= 3) {
       const avgTVL = tvlHistory.reduce((a, b) => a + b, 0) / tvlHistory.length;
       const variance = tvlHistory.reduce((sum, tvl) => sum + Math.pow(tvl - avgTVL, 2), 0) / tvlHistory.length;
@@ -382,74 +403,89 @@ export async function evaluateVaultRisk(vaultData: VaultRiskRequest) {
       const coefficientOfVariation = avgTVL > 0 ? (stdDev / avgTVL) * 100 : 0;
 
       if (coefficientOfVariation < 5) {
-        // Muy estable
+        // Muy estable - excelente señal
+        score += 15;
+        factors.tvlStability = 15;
+        reasons.push("✅ TVL muy estable (excelente)");
+      } else if (coefficientOfVariation < 10) {
+        // Estable - buena señal
         score += 10;
         factors.tvlStability = 10;
-        reasons.push("TVL muy estable");
-      } else if (coefficientOfVariation < 10) {
-        // Estable
-        score += 7;
-        factors.tvlStability = 7;
-        reasons.push("TVL estable");
+        reasons.push("✅ TVL estable");
       } else if (coefficientOfVariation < 20) {
-        // Moderadamente variable
+        // Moderadamente variable - aceptable
         score += 3;
         factors.tvlStability = 3;
         reasons.push("TVL moderadamente variable");
+      } else if (coefficientOfVariation < 40) {
+        // Variable - preocupante
+        score -= 8;
+        factors.tvlStability = -8;
+        reasons.push("⚠️ TVL variable (riesgo)");
       } else {
-        // Muy variable (riesgoso)
-        score -= 5;
-        factors.tvlStability = -5;
-        reasons.push("TVL muy variable (riesgo)");
+        // Muy variable - muy riesgoso
+        score -= 15;
+        factors.tvlStability = -15;
+        reasons.push("🚨 TVL muy variable (alto riesgo)");
       }
     }
 
-    // Factor 4: APY (0-15 puntos) - APY muy alto puede ser señal de riesgo
+    // Factor 4: APY (0-10 puntos) - Reducido porque no es tan determinante
+    // APY muy alto puede ser señal de riesgo, pero no es el factor más importante
     if (vaultAPY !== undefined && vaultAPY !== null) {
-      if (vaultAPY > 50) {
-        // APY > 50% es muy alto, puede ser riesgoso
-        score -= 15;
-        factors.apy = -15;
-        reasons.push(`APY extremadamente alto: ${vaultAPY.toFixed(2)}% (riesgo)`);
+      if (vaultAPY > 100) {
+        // APY > 100% es extremadamente sospechoso
+        score -= 12;
+        factors.apy = -12;
+        reasons.push(`🚨 APY extremadamente alto: ${vaultAPY.toFixed(2)}% (muy sospechoso)`);
+      } else if (vaultAPY > 50) {
+        // APY 50-100% es muy alto, puede ser riesgoso
+        score -= 8;
+        factors.apy = -8;
+        reasons.push(`⚠️ APY muy alto: ${vaultAPY.toFixed(2)}% (riesgo)`);
       } else if (vaultAPY > 30) {
         // APY 30-50% es alto pero razonable
-        score += 5;
-        factors.apy = 5;
+        score += 3;
+        factors.apy = 3;
         reasons.push(`APY alto: ${vaultAPY.toFixed(2)}%`);
       } else if (vaultAPY > 15) {
         // APY 15-30% es bueno
-        score += 12;
-        factors.apy = 12;
+        score += 6;
+        factors.apy = 6;
         reasons.push(`APY atractivo: ${vaultAPY.toFixed(2)}%`);
       } else if (vaultAPY > 5) {
         // APY 5-15% es normal
-        score += 10;
-        factors.apy = 10;
+        score += 5;
+        factors.apy = 5;
         reasons.push(`APY razonable: ${vaultAPY.toFixed(2)}%`);
       } else if (vaultAPY > 0) {
         // APY < 5% es bajo pero seguro
-        score += 5;
-        factors.apy = 5;
+        score += 2;
+        factors.apy = 2;
         reasons.push(`APY bajo: ${vaultAPY.toFixed(2)}%`);
       }
     } else if (vaultData.apy) {
       // Fallback a apy del request
       const apy = vaultData.apy;
-      if (apy > 50) {
-        score -= 15;
-        factors.apy = -15;
-        reasons.push("APY extremadamente alto (riesgo)");
+      if (apy > 100) {
+        score -= 12;
+        factors.apy = -12;
+        reasons.push("APY extremadamente alto (muy sospechoso)");
+      } else if (apy > 50) {
+        score -= 8;
+        factors.apy = -8;
+        reasons.push("APY muy alto (riesgo)");
       } else if (apy > 20) {
-        score += 10;
-        factors.apy = 10;
+        score += 3;
+        factors.apy = 3;
         reasons.push("APY alto");
       } else if (apy > 5) {
-        score += 12;
-        factors.apy = 12;
-        reasons.push("APY razonable");
-      } else {
         score += 5;
         factors.apy = 5;
+        reasons.push("APY razonable");
+      } else {
+        score += 2;
+        factors.apy = 2;
         reasons.push("APY bajo pero seguro");
       }
     }

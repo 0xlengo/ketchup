@@ -9,11 +9,15 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.90.10",
+    "@wagmi/connectors": "^7.0.1",
+    "@wagmi/core": "^3.0.0",
     "cheerio": "^1.1.2",
     "next": "^14.0.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "viem": "^2.39.3"
+    "viem": "^2.39.3",
+    "wagmi": "^3.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
