@@ -13,6 +13,7 @@ interface WithdrawButtonProps {
   loadingBalances: Record<string, boolean>;
   setVaultBalances: React.Dispatch<React.SetStateAction<Record<string, { shares: bigint; assets: bigint; decimals: number }>>>;
   setLoadingBalances: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
+  withdrawing?: boolean;
 }
 
 export default function WithdrawButton({
@@ -25,8 +26,10 @@ export default function WithdrawButton({
   loadingBalances,
   setVaultBalances,
   setLoadingBalances,
+  withdrawing: externalWithdrawing = false,
 }: WithdrawButtonProps) {
-  const [withdrawing, setWithdrawing] = useState(false);
+  const [localWithdrawing, setLocalWithdrawing] = useState(false);
+  const withdrawing = externalWithdrawing || localWithdrawing;
   const balanceKey = `${vaultAddress}-${chainId}`;
   const balance = vaultBalances[balanceKey];
   const isLoading = loadingBalances[balanceKey] || false;
@@ -37,9 +40,13 @@ export default function WithdrawButton({
       loadBalance();
     }
     // Actualizar balance cada 30 segundos
-    const interval = setInterval(loadBalance, 30000);
+    const interval = setInterval(() => {
+      if (!withdrawing) {
+        loadBalance();
+      }
+    }, 30000);
     return () => clearInterval(interval);
-  }, [vaultAddress, chainId]);
+  }, [vaultAddress, chainId, withdrawing]);
 
   const loadBalance = async () => {
     if (isLoading) return;
@@ -57,13 +64,15 @@ export default function WithdrawButton({
   };
 
   const handleWithdrawClick = async () => {
-    setWithdrawing(true);
+    setLocalWithdrawing(true);
     try {
       await onWithdraw(vaultAddress, chainId);
-      // Recargar balance después del retiro
-      await loadBalance();
+      // Esperar un momento y luego recargar balance
+      setTimeout(async () => {
+        await loadBalance();
+      }, 2000);
     } finally {
-      setWithdrawing(false);
+      setLocalWithdrawing(false);
     }
   };
 

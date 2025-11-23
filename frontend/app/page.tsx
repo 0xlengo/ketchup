@@ -70,6 +70,8 @@ export default function Home() {
   const [showDepositsSection, setShowDepositsSection] = useState(false);
   const [vaultBalances, setVaultBalances] = useState<Record<string, { shares: bigint; assets: bigint; decimals: number }>>({});
   const [loadingBalances, setLoadingBalances] = useState<Record<string, boolean>>({});
+  const [depositStep, setDepositStep] = useState<'idle' | 'approving' | 'depositing' | 'success' | 'error'>('idle');
+  const [withdrawingVaults, setWithdrawingVaults] = useState<Record<string, boolean>>({});
 
   // Escuchar cambios de red
   useEffect(() => {
@@ -537,6 +539,8 @@ export default function Home() {
       return;
     }
 
+    setDepositStep('idle');
+
     try {
       const vaultAddress = selectedVault.address as `0x${string}`;
       const targetChainId = selectedVault.chainId || 1;
@@ -555,6 +559,7 @@ export default function Home() {
         );
         const switched = await switchToChain(targetChainId);
         if (!switched) {
+          setDepositStep('error');
           return; // El usuario canceló o hubo error
         }
         // Esperar un momento para que la red se actualice
@@ -595,7 +600,11 @@ export default function Home() {
       });
 
       if (userBalance < amountInWei) {
-        alert(`Balance insuficiente. Tienes ${formatUnits(userBalance, decimals)} tokens`);
+        showNotification(
+          `Balance insuficiente. Tienes ${formatUnits(userBalance, decimals)} tokens`,
+          "error"
+        );
+        setDepositStep('error');
         return;
       }
 
@@ -627,7 +636,10 @@ export default function Home() {
         }
       }
 
-      // Hacer el depósito
+      // Hacer el depósito - PASO 2
+      setDepositStep('depositing');
+      showNotification("Paso 2/2: Depositando en el vault...", "info");
+      
       let depositHash: `0x${string}`;
       
       if (isETH) {
@@ -654,9 +666,12 @@ export default function Home() {
       }
 
       // Esperar confirmación
+      showNotification("Esperando confirmación del depósito...", "info");
       const receipt = await publicClient.waitForTransactionReceipt({ hash: depositHash });
 
       if (receipt.status === 'success') {
+        setDepositStep('success');
+        
         // Registrar el depósito en nuestro sistema para monitoreo automático
         const registerResponse = await fetch("/api/register-deposit", {
           method: "POST",
@@ -674,7 +689,7 @@ export default function Home() {
         if (registerResponse.ok) {
           const data = await registerResponse.json();
           showNotification(
-            `Depósito exitoso! TX: ${depositHash.slice(0, 10)}... Será monitoreado automáticamente.`,
+            `✅ Depósito exitoso! TX: ${depositHash.slice(0, 10)}... Será monitoreado automáticamente.`,
             "success",
             8000
           );
@@ -683,29 +698,38 @@ export default function Home() {
             await loadUserDeposits(address);
             setShowDepositsSection(true); // Mostrar sección de depósitos
           }
-          // Actualizar balance del vault para mostrar botón de retirar
+          // Actualizar balance del vault inmediatamente
           if (selectedVault.address) {
             const balanceKey = `${selectedVault.address}-${selectedVault.chainId || 1}`;
-            const newBalance = await getUserVaultBalance(selectedVault.address, selectedVault.chainId || 1);
-            if (newBalance) {
-              setVaultBalances((prev) => ({ ...prev, [balanceKey]: newBalance }));
-            }
+            // Esperar un momento para que el balance se actualice en la blockchain
+            setTimeout(async () => {
+              const newBalance = await getUserVaultBalance(selectedVault.address!, selectedVault.chainId || 1);
+              if (newBalance) {
+                setVaultBalances((prev) => ({ ...prev, [balanceKey]: newBalance }));
+              }
+            }, 2000);
           }
         } else {
           showNotification(
-            `Depósito exitoso! TX: ${depositHash.slice(0, 10)}... No se pudo registrar para monitoreo.`,
+            `✅ Depósito exitoso! TX: ${depositHash.slice(0, 10)}... No se pudo registrar para monitoreo.`,
             "warning",
             8000
           );
         }
 
-        setShowDepositModal(false);
-        setDepositAmount("");
+        // Cerrar modal después de un breve delay
+        setTimeout(() => {
+          setShowDepositModal(false);
+          setDepositAmount("");
+          setDepositStep('idle');
+        }, 2000);
       } else {
+        setDepositStep('error');
         showNotification("Error: La transacción falló", "error");
       }
     } catch (error: any) {
       console.error("Error al depositar:", error);
+      setDepositStep('error');
       if (error.message?.includes("user rejected") || error.message?.includes("User rejected")) {
         showNotification("Transacción cancelada por el usuario", "warning");
       } else if (error.message?.includes("chain") || error.message?.includes("Chain")) {
@@ -938,7 +962,19 @@ export default function Home() {
                     {/* Información principal */}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1">
-                        <h3 className="text-base font-semibold text-gray-900 truncate">{vault.name}</h3>
+                        {vault.address ? (
+                          <a
+                            href={`https://app.morpho.org/${vault.chainId === 8453 ? 'base' : 'ethereum'}/vault/${vault.address}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-base font-semibold text-gray-900 truncate hover:text-blue-600 hover:underline transition-colors cursor-pointer"
+                            title={`Ver vault en Morpho: ${vault.name}`}
+                          >
+                            {vault.name}
+                          </a>
+                        ) : (
+                          <h3 className="text-base font-semibold text-gray-900 truncate">{vault.name}</h3>
+                        )}
                         {vault.chain && (
                           <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs font-medium">
                             {vault.chain}
@@ -1040,12 +1076,53 @@ export default function Home() {
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-2xl font-bold text-gray-900">Depositar en {selectedVault.name}</h2>
                 <button
-                  onClick={() => setShowDepositModal(false)}
-                  className="text-gray-400 hover:text-gray-600 text-2xl"
+                  onClick={() => {
+                    if (depositStep === 'idle' || depositStep === 'error' || depositStep === 'success') {
+                      setShowDepositModal(false);
+                      setDepositAmount("");
+                      setDepositStep('idle');
+                    }
+                  }}
+                  disabled={depositStep === 'approving' || depositStep === 'depositing'}
+                  className="text-gray-400 hover:text-gray-600 text-2xl disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   ×
                 </button>
               </div>
+
+              {/* Indicador de progreso */}
+              {(depositStep === 'approving' || depositStep === 'depositing') && (
+                <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                  <div className="flex items-center gap-3">
+                    <svg className="animate-spin h-5 w-5 text-blue-600" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                    <div>
+                      <div className="font-semibold text-blue-900">
+                        {depositStep === 'approving' ? 'Paso 1/2: Aprobando gasto...' : 'Paso 2/2: Depositando...'}
+                      </div>
+                      <div className="text-sm text-blue-700">
+                        {depositStep === 'approving' 
+                          ? 'Confirma la transacción en tu wallet para aprobar el gasto del token'
+                          : 'Confirma la transacción en tu wallet para completar el depósito'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {depositStep === 'success' && (
+                <div className="mb-4 p-4 bg-emerald-50 border border-emerald-200 rounded-lg">
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">✅</span>
+                    <div>
+                      <div className="font-semibold text-emerald-900">Depósito exitoso!</div>
+                      <div className="text-sm text-emerald-700">El modal se cerrará automáticamente...</div>
+                    </div>
+                  </div>
+                </div>
+              )}
               
               <div className="mb-4">
                 <div className="bg-gray-50 rounded-lg p-4 mb-4">
@@ -1135,10 +1212,38 @@ export default function Home() {
                 </button>
                 <button
                   onClick={confirmDeposit}
-                  disabled={!isConnected || !depositAmount || parseFloat(depositAmount) <= 0}
-                  className="flex-1 px-4 py-3 bg-emerald-600 text-white rounded-lg font-semibold hover:bg-emerald-700 transition-colors disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed"
+                  disabled={
+                    !isConnected || 
+                    !depositAmount || 
+                    parseFloat(depositAmount) <= 0 ||
+                    depositStep === 'approving' ||
+                    depositStep === 'depositing'
+                  }
+                  className="flex-1 px-4 py-3 bg-emerald-600 text-white rounded-lg font-semibold hover:bg-emerald-700 transition-colors disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
-                  {!isConnected ? "Conecta Wallet" : "Depositar"}
+                  {depositStep === 'approving' ? (
+                    <>
+                      <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                      Aprobando...
+                    </>
+                  ) : depositStep === 'depositing' ? (
+                    <>
+                      <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                      Depositando...
+                    </>
+                  ) : depositStep === 'success' ? (
+                    "✅ Completado"
+                  ) : !isConnected ? (
+                    "Conecta Wallet"
+                  ) : (
+                    "Depositar"
+                  )}
                 </button>
               </div>
             </div>
