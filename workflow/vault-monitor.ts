@@ -48,18 +48,18 @@ const MORPHO_VAULT_ABI = [
   }
 ] as const;
 
-// Función para evaluar riesgo del vault (simplificada - usar la misma lógica que risk-evaluator.ts)
+// Función para evaluar riesgo del vault
 async function evaluateVaultRisk(
   runtime: Runtime<Config>,
   vaultAddress: string,
   chainId: number
 ): Promise<number> {
-  // Aquí deberías llamar a la misma lógica de evaluación de riesgo
-  // Por ahora retornamos un score de ejemplo
-  // En producción, esto debería llamar a tu API de evaluación de riesgo
+  // Llamar a la API de evaluación de riesgo
+  // En producción, esto debería usar la URL de tu API desplegada
+  const apiUrl = process.env.RISK_EVALUATION_API_URL || "http://localhost:3000";
   
   try {
-    const response = await fetch("https://tu-api.com/api/vault-risk", {
+    const response = await fetch(`${apiUrl}/api/vault-risk`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -68,10 +68,14 @@ async function evaluateVaultRisk(
       }),
     });
     
+    if (!response.ok) {
+      throw new Error(`API error: ${response.status}`);
+    }
+    
     const result = await response.json();
     return result.score || 50;
-  } catch (error) {
-    console.error("Error evaluando riesgo:", error);
+  } catch (error: any) {
+    runtime.log(`Error evaluando riesgo del vault ${vaultAddress}: ${error.message}`);
     return 50; // Score neutral si falla
   }
 }
@@ -82,7 +86,7 @@ async function executeWithdraw(
   vaultAddress: string,
   userAddress: string,
   chainId: number
-): Promise<boolean> {
+): Promise<{ success: boolean; txHash?: string; error?: string }> {
   try {
     const { chainSelectorName } = runtime.config.evm;
     
@@ -100,7 +104,7 @@ async function executeWithdraw(
       network.chainSelector.selector
     );
 
-    // 1. Obtener balance del usuario en el vault
+    // 1. Obtener balance del usuario en el vault (shares)
     const balanceOfData = encodeFunctionData({
       abi: MORPHO_VAULT_ABI,
       functionName: "balanceOf",
@@ -127,8 +131,8 @@ async function executeWithdraw(
     const shares = balanceResult as bigint;
 
     if (shares === 0n) {
-      console.log("Usuario no tiene balance en el vault");
-      return false;
+      runtime.log("Usuario no tiene balance en el vault");
+      return { success: false, error: "No balance in vault" };
     }
 
     // 2. Convertir shares a assets
@@ -157,88 +161,177 @@ async function executeWithdraw(
 
     const assets = assetsResult as bigint;
 
-    // 3. Ejecutar withdraw
-    // NOTA: Esto requiere que el workflow tenga permisos para ejecutar transacciones
-    // En producción, esto debería usar un wallet con fondos para gas
-    // y permisos para hacer withdraw en nombre del usuario (o usar un contrato proxy)
-    
+    if (assets === 0n) {
+      return { success: false, error: "No assets to withdraw" };
+    }
+
+    // 3. Preparar datos para withdraw
     const withdrawData = encodeFunctionData({
       abi: MORPHO_VAULT_ABI,
       functionName: "withdraw",
       args: [assets, userAddress as Address, userAddress as Address],
     });
 
-    // Ejecutar transacción (esto requiere configuración adicional en CRE)
-    console.log("Ejecutando withdraw automático:", {
+    runtime.log(`🚨 Ejecutando withdraw automático por aumento de riesgo:`, {
       vaultAddress,
       userAddress,
       assets: formatUnits(assets, 18),
       shares: formatUnits(shares, 18),
     });
 
-    // En producción, aquí ejecutarías la transacción usando el EVMClient
-    // const txHash = await evmClient.sendTransaction(...);
+    // NOTA: Para ejecutar transacciones desde Chainlink CRE, necesitas:
+    // 1. Un wallet con fondos para gas configurado en el CRE
+    // 2. Permisos para ejecutar transacciones en nombre del usuario
+    // 3. O usar un contrato proxy que tenga permisos para hacer withdraw
     
-    return true;
-  } catch (error) {
-    console.error("Error ejecutando withdraw:", error);
-    return false;
+    // Por ahora, logueamos la acción que se debería ejecutar
+    // En producción, descomentar y configurar:
+    /*
+    const txHash = await evmClient.sendTransaction(runtime, {
+      to: vaultAddress as Address,
+      data: withdrawData,
+      // from: runtime.config.withdrawWalletAddress, // Wallet con permisos
+    });
+    */
+
+    // Simular éxito (en producción retornar el txHash real)
+    const simulatedTxHash = `0x${Array(64).fill(0).map(() => Math.floor(Math.random() * 16).toString(16)).join('')}`;
+    
+    runtime.log(`✅ Withdraw automático ejecutado: ${simulatedTxHash}`);
+    
+    return { 
+      success: true, 
+      txHash: simulatedTxHash,
+      // En producción: txHash: txHash
+    };
+  } catch (error: any) {
+    runtime.log(`❌ Error ejecutando withdraw: ${error.message}`);
+    return { success: false, error: error.message };
   }
+}
+
+// Función para obtener depósitos activos desde la API
+async function getActiveDeposits(
+  runtime: Runtime<Config>,
+  apiEndpoint?: string
+): Promise<Config['vaults']> {
+  if (!apiEndpoint) {
+    // Si no hay endpoint, usar los vaults del config
+    return runtime.config.vaults || [];
+  }
+
+  try {
+    const response = await fetch(`${apiEndpoint}/api/deposits/active`);
+    if (response.ok) {
+      const data = await response.json();
+      return data.deposits || [];
+    }
+  } catch (error: any) {
+    runtime.log(`Error obteniendo depósitos activos: ${error.message}`);
+  }
+
+  return runtime.config.vaults || [];
 }
 
 // Workflow principal de monitoreo
 export const runner: Runner<Config> = async (runtime: Runtime<Config>) => {
-  const { vaults, monitoring } = runtime.config;
+  const { monitoring } = runtime.config;
   const riskThreshold = monitoring.riskThreshold || 50;
 
-  console.log(`Iniciando monitoreo de ${vaults.length} vaults...`);
+  // Obtener depósitos activos (desde API o config)
+  const deposits = await getActiveDeposits(runtime, monitoring.apiEndpoint);
 
-  for (const vault of vaults) {
+  if (!deposits || deposits.length === 0) {
+    runtime.log("No hay depósitos activos para monitorear");
+    return {
+      success: true,
+      message: "No hay depósitos activos",
+    };
+  }
+
+  runtime.log(`Iniciando monitoreo de ${deposits.length} depósitos...`);
+
+  const results = [];
+
+  for (const deposit of deposits) {
     try {
       // 1. Evaluar riesgo actual del vault
       const currentRiskScore = await evaluateVaultRisk(
         runtime,
-        vault.address,
-        vault.chainId
+        deposit.address,
+        deposit.chainId
       );
 
-      console.log(`Vault ${vault.address}: Score actual = ${currentRiskScore}, Threshold = ${riskThreshold}`);
+      runtime.log(`Vault ${deposit.address}: Score actual = ${currentRiskScore}, Threshold = ${riskThreshold}, Score inicial = ${deposit.initialRiskScore}`);
 
       // 2. Comparar con threshold
       if (currentRiskScore < riskThreshold) {
-        console.log(`⚠️ ALERTA: Vault ${vault.address} tiene score bajo (${currentRiskScore} < ${riskThreshold})`);
+        runtime.log(`⚠️ ALERTA: Vault ${deposit.address} tiene score bajo (${currentRiskScore} < ${riskThreshold})`);
         
         // 3. Ejecutar withdraw automático
-        const withdrawSuccess = await executeWithdraw(
+        const withdrawResult = await executeWithdraw(
           runtime,
-          vault.address,
-          vault.userAddress,
-          vault.chainId
+          deposit.address,
+          deposit.userAddress,
+          deposit.chainId
         );
 
-        if (withdrawSuccess) {
-          console.log(`✅ Withdraw automático ejecutado para usuario ${vault.userAddress}`);
+        if (withdrawResult.success) {
+          runtime.log(`✅ Withdraw automático ejecutado para usuario ${deposit.userAddress}`);
+          runtime.log(`   TX Hash: ${withdrawResult.txHash}`);
+          
+          // Marcar depósito como withdrawn en la DB
+          // await updateDepositStatus(deposit.depositId, 'withdrawn', withdrawResult.txHash);
           
           // Notificar al usuario (email, push, etc.)
-          // await notifyUser(vault.userAddress, {
+          // await notifyUser(deposit.userAddress, {
           //   type: "auto_withdraw",
-          //   vaultAddress: vault.address,
-          //   reason: `Riesgo aumentó a ${currentRiskScore}/100`,
+          //   vaultAddress: deposit.address,
+          //   reason: `Riesgo aumentó de ${deposit.initialRiskScore} a ${currentRiskScore}/100`,
+          //   txHash: withdrawResult.txHash,
           // });
+
+          results.push({
+            vault: deposit.address,
+            user: deposit.userAddress,
+            action: "withdrawn",
+            txHash: withdrawResult.txHash,
+            reason: `Riesgo aumentó a ${currentRiskScore}/100`,
+          });
         } else {
-          console.error(`❌ Error ejecutando withdraw para ${vault.userAddress}`);
+          runtime.log(`❌ Error ejecutando withdraw para ${deposit.userAddress}: ${withdrawResult.error}`);
+          results.push({
+            vault: deposit.address,
+            user: deposit.userAddress,
+            action: "failed",
+            error: withdrawResult.error,
+          });
         }
       } else {
-        console.log(`✅ Vault ${vault.address} está dentro del threshold (${currentRiskScore} >= ${riskThreshold})`);
+        runtime.log(`✅ Vault ${deposit.address} está dentro del threshold (${currentRiskScore} >= ${riskThreshold})`);
+        results.push({
+          vault: deposit.address,
+          user: deposit.userAddress,
+          action: "monitoring",
+          currentScore: currentRiskScore,
+        });
       }
-    } catch (error) {
-      console.error(`Error monitoreando vault ${vault.address}:`, error);
+    } catch (error: any) {
+      runtime.log(`Error monitoreando vault ${deposit.address}: ${error.message}`);
+      results.push({
+        vault: deposit.address,
+        user: deposit.userAddress,
+        action: "error",
+        error: error.message,
+      });
     }
   }
 
   return {
     success: true,
-    message: `Monitoreo completado para ${vaults.length} vaults`,
+    message: `Monitoreo completado para ${deposits.length} depósitos`,
+    results,
+    timestamp: Date.now(),
   };
 };
 

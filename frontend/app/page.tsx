@@ -1,19 +1,16 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { parseUnits, createWalletClient, custom, http } from "viem";
+import { parseUnits, createWalletClient, custom, http, createPublicClient, formatUnits, encodeFunctionData } from "viem";
 import { mainnet, base } from "viem/chains";
 import TemperatureGauge from "./components/TemperatureGauge";
+import WalletButton from "./components/WalletButton";
+import UserDepositCard from "./components/UserDepositCard";
+import WithdrawButton from "./components/WithdrawButton";
+import { MORPHO_VAULT_ABI, ERC20_ABI } from "./utils/morpho-vault";
+import { useNotifications } from "./components/Notification";
 
-// Extender Window para incluir ethereum
-declare global {
-  interface Window {
-    ethereum?: {
-      request: (args: { method: string; params?: any[] }) => Promise<any>;
-      isMetaMask?: boolean;
-    };
-  }
-}
+// Extender Window para incluir ethereum (definición completa en WalletButton.tsx)
 
 // Forzar renderizado dinámico (no pre-renderizar en build)
 export const dynamic = 'force-dynamic';
@@ -50,33 +47,12 @@ const CHAIN_NAMES: Record<number, string> = {
   42161: "Arbitrum",
 };
 
-// ABI simplificado de Morpho Vault para deposit
-const MORPHO_VAULT_ABI = [
-  {
-    name: "deposit",
-    type: "function",
-    stateMutability: "payable",
-    inputs: [
-      { name: "assets", type: "uint256" },
-      { name: "receiver", type: "address" }
-    ],
-    outputs: [{ name: "shares", type: "uint256" }]
-  },
-  {
-    name: "deposit",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "assets", type: "uint256" },
-      { name: "receiver", type: "address" }
-    ],
-    outputs: [{ name: "shares", type: "uint256" }]
-  }
-] as const;
 
 export default function Home() {
+  const { showNotification, NotificationContainer } = useNotifications();
   const [address, setAddress] = useState<`0x${string}` | undefined>();
   const [isConnected, setIsConnected] = useState(false);
+  const [currentChainId, setCurrentChainId] = useState<number>(1);
 
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [filteredVaults, setFilteredVaults] = useState<Vault[]>([]);
@@ -89,6 +65,27 @@ export default function Home() {
   const [depositAmount, setDepositAmount] = useState<string>("");
   const [selectedVault, setSelectedVault] = useState<Vault | null>(null);
   const [showDepositModal, setShowDepositModal] = useState(false);
+  const [userDeposits, setUserDeposits] = useState<any[]>([]);
+  const [loadingDeposits, setLoadingDeposits] = useState(false);
+  const [showDepositsSection, setShowDepositsSection] = useState(false);
+  const [vaultBalances, setVaultBalances] = useState<Record<string, { shares: bigint; assets: bigint; decimals: number }>>({});
+  const [loadingBalances, setLoadingBalances] = useState<Record<string, boolean>>({});
+
+  // Escuchar cambios de red
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.ethereum && isConnected) {
+      const handleChainChanged = (chainIdHex: string) => {
+        const newChainId = parseInt(chainIdHex, 16);
+        setCurrentChainId(newChainId);
+      };
+
+      window.ethereum.on?.('chainChanged', handleChainChanged);
+
+      return () => {
+        window.ethereum?.removeListener?.('chainChanged', handleChainChanged);
+      };
+    }
+  }, [isConnected]);
 
   // Cargar vaults desde la API de Morpho al montar el componente
   const loadVaults = async () => {
@@ -248,76 +245,489 @@ export default function Home() {
   // Obtener cadenas únicas de los vaults
   const availableChains = Array.from(new Set(vaults.map(v => v.chainId).filter((id): id is number => id !== undefined && id !== null)));
 
-  // Conectar wallet
-  const connectWallet = async () => {
-    if (typeof window === 'undefined' || !window.ethereum) {
-      alert("Por favor instala MetaMask u otro wallet compatible");
+  // Handlers para el componente WalletButton
+  const handleWalletConnect = (walletAddress: `0x${string}`) => {
+    setAddress(walletAddress);
+    setIsConnected(true);
+    // Obtener chainId actual
+    if (window.ethereum) {
+      window.ethereum.request({ method: 'eth_chainId' }).then((chainIdHex: string) => {
+        setCurrentChainId(parseInt(chainIdHex, 16));
+      });
+    }
+    // Cargar depósitos del usuario
+    loadUserDeposits(walletAddress);
+  };
+
+  const handleWalletDisconnect = () => {
+    setAddress(undefined);
+    setIsConnected(false);
+    setCurrentChainId(1);
+    setUserDeposits([]);
+    setShowDepositsSection(false);
+  };
+
+  // Cargar depósitos activos del usuario
+  const loadUserDeposits = async (userAddress: `0x${string}`) => {
+    setLoadingDeposits(true);
+    try {
+      const response = await fetch(`/api/deposits/user?userAddress=${userAddress}`);
+      if (response.ok) {
+        const data = await response.json();
+        setUserDeposits(data.deposits || []);
+      }
+    } catch (error) {
+      console.error("Error cargando depósitos:", error);
+    } finally {
+      setLoadingDeposits(false);
+    }
+  };
+
+  // Obtener balance actual del usuario en un vault
+  const getUserVaultBalance = async (vaultAddress: string, chainId: number): Promise<{ shares: bigint; assets: bigint; decimals: number } | null> => {
+    if (!address || !window.ethereum) return null;
+
+    try {
+      const chain = chainId === 8453 ? base : mainnet;
+      const publicClient = createPublicClient({
+        chain,
+        transport: http(),
+      });
+
+      // Obtener shares del usuario
+      const shares = await publicClient.readContract({
+        address: vaultAddress as `0x${string}`,
+        abi: MORPHO_VAULT_ABI,
+        functionName: "balanceOf",
+        args: [address],
+      });
+
+      if (shares === 0n) {
+        return { shares: 0n, assets: 0n, decimals: 18 };
+      }
+
+      // Convertir shares a assets
+      const assets = await publicClient.readContract({
+        address: vaultAddress as `0x${string}`,
+        abi: MORPHO_VAULT_ABI,
+        functionName: "convertToAssets",
+        args: [shares],
+      });
+
+      // Obtener decimals del asset
+      const assetAddress = await publicClient.readContract({
+        address: vaultAddress as `0x${string}`,
+        abi: MORPHO_VAULT_ABI,
+        functionName: "asset",
+      });
+
+      const decimals = await publicClient.readContract({
+        address: assetAddress as `0x${string}`,
+        abi: ERC20_ABI,
+        functionName: "decimals",
+      }).catch(() => 18);
+
+      return { shares, assets, decimals };
+    } catch (error) {
+      console.error("Error obteniendo balance del vault:", error);
+      return null;
+    }
+  };
+
+  // Función para retirar fondos
+  const handleWithdraw = async (vaultAddress: string, chainId: number, depositId?: string) => {
+    if (!isConnected || !address) {
+      showNotification("Por favor conecta tu wallet primero", "warning");
       return;
+    }
+
+    try {
+      // Verificar y cambiar de red si es necesario
+      if (currentChainId !== chainId) {
+        showNotification(
+          `Cambiando a ${chainId === 8453 ? 'Base' : 'Ethereum'}...`,
+          "info"
+        );
+        const switched = await switchToChain(chainId);
+        if (!switched) {
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+
+      // Obtener balance actual
+      const balance = await getUserVaultBalance(vaultAddress, chainId);
+      if (!balance || balance.assets === 0n) {
+        showNotification("No tienes fondos para retirar en este vault", "warning");
+        return;
+      }
+
+      const chain = chainId === 8453 ? base : mainnet;
+      const walletClient = createWalletClient({
+        chain,
+        transport: custom(window.ethereum!),
+      });
+
+      const publicClient = createPublicClient({
+        chain,
+        transport: http(),
+      });
+
+      // Ejecutar retiro (retirar todos los assets)
+      const withdrawHash = await walletClient.writeContract({
+        address: vaultAddress as `0x${string}`,
+        abi: MORPHO_VAULT_ABI,
+        functionName: "withdraw",
+        args: [balance.assets, address, address], // assets, receiver, owner
+        account: address,
+      });
+
+      // Esperar confirmación
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: withdrawHash });
+
+      if (receipt.status === 'success') {
+        showNotification(
+          `Retiro exitoso! TX: ${withdrawHash.slice(0, 10)}...`,
+          "success",
+          8000
+        );
+
+        // Actualizar lista de depósitos
+        if (address) {
+          await loadUserDeposits(address);
+        }
+      } else {
+        showNotification("Error: La transacción falló", "error");
+      }
+    } catch (error: any) {
+      console.error("Error al retirar:", error);
+      if (error.message?.includes("user rejected") || error.message?.includes("User rejected")) {
+        showNotification("Transacción cancelada por el usuario", "warning");
+      } else {
+        showNotification(
+          `Error al retirar: ${error.message || "Error desconocido"}`,
+          "error",
+          8000
+        );
+      }
+    }
+  };
+
+  // Función auxiliar para conectar wallet (usada en el modal)
+  const connectWallet = async (): Promise<boolean> => {
+    if (typeof window === 'undefined' || !window.ethereum) {
+      showNotification("Por favor instala MetaMask u otro wallet compatible", "error");
+      return false;
     }
 
     try {
       const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
       if (accounts && accounts.length > 0) {
-        setAddress(accounts[0] as `0x${string}`);
-        setIsConnected(true);
+        handleWalletConnect(accounts[0] as `0x${string}`);
+        // Obtener chainId actual
+        const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
+        setCurrentChainId(parseInt(chainIdHex as string, 16));
+        return true;
       }
-    } catch (error) {
+      return false;
+    } catch (error: any) {
       console.error("Error conectando wallet:", error);
-      alert("Error al conectar wallet");
+      if (error.code === 4001) {
+        showNotification("Conexión rechazada por el usuario", "warning");
+      } else {
+        showNotification("Error al conectar wallet", "error");
+      }
+      return false;
+    }
+  };
+
+  // Función para cambiar de red automáticamente
+  const switchToChain = async (targetChainId: number): Promise<boolean> => {
+    if (!window.ethereum) {
+      showNotification("Wallet no disponible", "error");
+      return false;
+    }
+
+    try {
+      // Intentar cambiar de red
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: `0x${targetChainId.toString(16)}` }],
+      });
+      
+      setCurrentChainId(targetChainId);
+      return true;
+    } catch (switchError: any) {
+      // Si la red no está agregada, intentar agregarla
+      if (switchError.code === 4902) {
+        try {
+          const chainConfig = targetChainId === 8453 ? {
+            chainId: `0x${targetChainId.toString(16)}`,
+            chainName: 'Base',
+            nativeCurrency: {
+              name: 'Ethereum',
+              symbol: 'ETH',
+              decimals: 18,
+            },
+            rpcUrls: ['https://mainnet.base.org'],
+            blockExplorerUrls: ['https://basescan.org'],
+          } : {
+            chainId: `0x${targetChainId.toString(16)}`,
+            chainName: 'Ethereum Mainnet',
+            nativeCurrency: {
+              name: 'Ethereum',
+              symbol: 'ETH',
+              decimals: 18,
+            },
+            rpcUrls: ['https://eth.llamarpc.com'],
+            blockExplorerUrls: ['https://etherscan.io'],
+          };
+
+          await window.ethereum.request({
+            method: 'wallet_addEthereumChain',
+            params: [chainConfig],
+          });
+
+          setCurrentChainId(targetChainId);
+          return true;
+        } catch (addError) {
+          console.error("Error agregando red:", addError);
+          showNotification(
+            `Error al agregar la red. Por favor cambia manualmente a ${targetChainId === 8453 ? 'Base' : 'Ethereum'} en tu wallet`,
+            "error"
+          );
+          return false;
+        }
+      } else {
+        console.error("Error cambiando de red:", switchError);
+        showNotification(
+          `Por favor cambia manualmente a ${targetChainId === 8453 ? 'Base' : 'Ethereum'} en tu wallet`,
+          "error"
+        );
+        return false;
+      }
     }
   };
 
   // Función para manejar depósito
   const handleDeposit = (vault: Vault, riskScore: number) => {
+    // Mostrar el modal directamente - el modal manejará la conexión de wallet
     setSelectedVault(vault);
     setDepositAmount("");
     setShowDepositModal(true);
   };
 
-  // Función para confirmar depósito
+  // Función para confirmar depósito (ahora deposita directamente)
   const confirmDeposit = async () => {
     if (!selectedVault || !depositAmount || parseFloat(depositAmount) <= 0) {
-      alert("Por favor ingresa una cantidad válida");
+      showNotification("Por favor ingresa una cantidad válida", "warning");
       return;
     }
 
-    if (!isConnected) {
+    // Verificar que la wallet esté conectada
+    if (!isConnected || !address) {
+      showNotification("Por favor conecta tu wallet primero", "warning");
+      setShowDepositModal(false);
       await connectWallet();
-      if (!address) {
-        alert("Por favor conecta tu wallet primero");
-        return;
-      }
+      return;
+    }
+
+    if (!selectedVault.address) {
+      showNotification("Error: No se encontró la dirección del vault", "error");
+      return;
     }
 
     try {
-      // Registrar el depósito en nuestro sistema para monitoreo
-      await fetch("/api/register-deposit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          vaultAddress: selectedVault.address,
-          userAddress: address,
-          amount: depositAmount,
-          riskScore: vaultRisks[selectedVault.id]?.score || 50,
-          chainId: selectedVault.chainId || 1,
-        }),
+      const vaultAddress = selectedVault.address as `0x${string}`;
+      const targetChainId = selectedVault.chainId || 1;
+      const chain = targetChainId === 8453 ? base : mainnet;
+      
+      if (!window.ethereum) {
+        showNotification("Wallet no disponible", "error");
+        return;
+      }
+
+      // Verificar y cambiar de red si es necesario
+      if (currentChainId !== targetChainId) {
+        showNotification(
+          `Cambiando a ${targetChainId === 8453 ? 'Base' : 'Ethereum'}...`,
+          "info"
+        );
+        const switched = await switchToChain(targetChainId);
+        if (!switched) {
+          return; // El usuario canceló o hubo error
+        }
+        // Esperar un momento para que la red se actualice
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+
+      const walletClient = createWalletClient({
+        chain,
+        transport: custom(window.ethereum),
       });
 
-      // Construir URL correcta de Morpho: vault/0x... en lugar de earn/0x...
-      const chainSlug = selectedVault.chainId === 8453 ? 'base' : 'ethereum';
-      const morphoUrl = `https://app.morpho.org/${chainSlug}/vault/${selectedVault.address}`;
+      const publicClient = createPublicClient({
+        chain,
+        transport: http(),
+      });
+
+      // Obtener el asset del vault para determinar si es ETH o ERC20
+      const assetAddress = await publicClient.readContract({
+        address: vaultAddress,
+        abi: MORPHO_VAULT_ABI,
+        functionName: "asset",
+      });
+
+      const decimals = await publicClient.readContract({
+        address: assetAddress as `0x${string}`,
+        abi: ERC20_ABI,
+        functionName: "decimals",
+      }).catch(() => 18); // Default a 18 si falla
+
+      const amountInWei = parseUnits(depositAmount, decimals);
+
+      // Verificar balance del usuario
+      const userBalance = await publicClient.readContract({
+        address: assetAddress as `0x${string}`,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [address],
+      });
+
+      if (userBalance < amountInWei) {
+        alert(`Balance insuficiente. Tienes ${formatUnits(userBalance, decimals)} tokens`);
+        return;
+      }
+
+      // Si es un token ERC20 (no ETH nativo), necesitamos hacer approve primero
+      const isETH = assetAddress === "0x0000000000000000000000000000000000000000" || 
+                    assetAddress.toLowerCase() === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
       
-      // Cerrar modal y abrir Morpho
-      setShowDepositModal(false);
-      window.open(morphoUrl, '_blank');
+      if (!isETH) {
+        // Verificar allowance
+        const allowance = await publicClient.readContract({
+          address: assetAddress as `0x${string}`,
+          abi: ERC20_ABI,
+          functionName: "allowance",
+          args: [address, vaultAddress],
+        });
+
+        if (allowance < amountInWei) {
+          // Hacer approve
+          const approveHash = await walletClient.writeContract({
+            address: assetAddress as `0x${string}`,
+            abi: ERC20_ABI,
+            functionName: "approve",
+            args: [vaultAddress, amountInWei],
+            account: address,
+          });
+
+          // Esperar confirmación del approve
+          await publicClient.waitForTransactionReceipt({ hash: approveHash });
+        }
+      }
+
+      // Hacer el depósito
+      let depositHash: `0x${string}`;
+      
+      if (isETH) {
+        // Depósito de ETH nativo - usar sendTransaction en lugar de writeContract para ETH
+        depositHash = await walletClient.sendTransaction({
+          to: vaultAddress,
+          value: amountInWei,
+          account: address,
+          data: encodeFunctionData({
+            abi: MORPHO_VAULT_ABI,
+            functionName: "deposit",
+            args: [amountInWei, address],
+          }),
+        });
+      } else {
+        // Depósito de token ERC20
+        depositHash = await walletClient.writeContract({
+          address: vaultAddress,
+          abi: MORPHO_VAULT_ABI,
+          functionName: "deposit",
+          args: [amountInWei, address],
+          account: address,
+        });
+      }
+
+      // Esperar confirmación
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: depositHash });
+
+      if (receipt.status === 'success') {
+        // Registrar el depósito en nuestro sistema para monitoreo automático
+        const registerResponse = await fetch("/api/register-deposit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            vaultAddress: selectedVault.address,
+            userAddress: address,
+            amount: depositAmount,
+            riskScore: vaultRisks[selectedVault.id]?.score || 50,
+            chainId: selectedVault.chainId || 1,
+            txHash: depositHash,
+          }),
+        });
+
+        if (registerResponse.ok) {
+          const data = await registerResponse.json();
+          showNotification(
+            `Depósito exitoso! TX: ${depositHash.slice(0, 10)}... Será monitoreado automáticamente.`,
+            "success",
+            8000
+          );
+          // Recargar depósitos del usuario
+          if (address) {
+            await loadUserDeposits(address);
+            setShowDepositsSection(true); // Mostrar sección de depósitos
+          }
+          // Actualizar balance del vault para mostrar botón de retirar
+          if (selectedVault.address) {
+            const balanceKey = `${selectedVault.address}-${selectedVault.chainId || 1}`;
+            const newBalance = await getUserVaultBalance(selectedVault.address, selectedVault.chainId || 1);
+            if (newBalance) {
+              setVaultBalances((prev) => ({ ...prev, [balanceKey]: newBalance }));
+            }
+          }
+        } else {
+          showNotification(
+            `Depósito exitoso! TX: ${depositHash.slice(0, 10)}... No se pudo registrar para monitoreo.`,
+            "warning",
+            8000
+          );
+        }
+
+        setShowDepositModal(false);
+        setDepositAmount("");
+      } else {
+        showNotification("Error: La transacción falló", "error");
+      }
     } catch (error: any) {
       console.error("Error al depositar:", error);
-      alert(`Error al depositar: ${error.message}`);
+      if (error.message?.includes("user rejected") || error.message?.includes("User rejected")) {
+        showNotification("Transacción cancelada por el usuario", "warning");
+      } else if (error.message?.includes("chain") || error.message?.includes("Chain")) {
+        showNotification(
+          `Error de red: ${error.message}. Por favor verifica que estés en la red correcta.`,
+          "error",
+          8000
+        );
+      } else {
+        showNotification(
+          `Error al depositar: ${error.message || "Error desconocido"}`,
+          "error",
+          8000
+        );
+      }
     }
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/30 to-indigo-50/50">
+    <>
+      <NotificationContainer />
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/30 to-indigo-50/50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         {/* Header Mejorado */}
         <div className="mb-12">
@@ -343,6 +753,34 @@ export default function Home() {
               </div>
             </div>
             <div className="flex flex-col gap-3">
+              {/* Componente de Wallet */}
+              <div className="flex items-center justify-end">
+                <WalletButton 
+                  onConnect={handleWalletConnect}
+                  onDisconnect={handleWalletDisconnect}
+                />
+              </div>
+              
+              {/* Botón para ver depósitos */}
+              {isConnected && address && (
+                <button
+                  onClick={() => {
+                    setShowDepositsSection(!showDepositsSection);
+                    if (!showDepositsSection && address) {
+                      loadUserDeposits(address);
+                    }
+                  }}
+                  className="px-4 py-2 bg-purple-100 text-purple-700 rounded-lg text-sm font-semibold hover:bg-purple-200 transition-colors flex items-center gap-2"
+                >
+                  {showDepositsSection ? "👁️ Ocultar" : "💰 Mis Depósitos"}
+                  {userDeposits.length > 0 && (
+                    <span className="px-2 py-0.5 bg-purple-200 rounded-full text-xs">
+                      {userDeposits.length}
+                    </span>
+                  )}
+                </button>
+              )}
+              
               <div className="flex gap-3">
                 <button
                   onClick={loadVaults}
@@ -543,8 +981,8 @@ export default function Home() {
                       )}
                     </div>
 
-                    {/* Botón de acción */}
-                    <div className="flex-shrink-0">
+                    {/* Botones de acción */}
+                    <div className="flex-shrink-0 flex items-center gap-2">
                       {risk && !isLoading ? (
                         risk.score < 50 ? (
                           <button
@@ -553,20 +991,38 @@ export default function Home() {
                           >
                             Bloqueado
                           </button>
-                        ) : risk.score >= 50 && risk.score < 70 ? (
-                          <button
-                            onClick={() => handleDeposit(vault, risk.score)}
-                            className="px-4 py-2 bg-amber-500 text-white rounded-lg text-sm font-semibold hover:bg-amber-600 transition-colors"
-                          >
-                            Depositar
-                          </button>
                         ) : (
-                          <button
-                            onClick={() => handleDeposit(vault, risk.score)}
-                            className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 transition-colors"
-                          >
-                            Depositar
-                          </button>
+                          <>
+                            {risk.score >= 50 && risk.score < 70 ? (
+                              <button
+                                onClick={() => handleDeposit(vault, risk.score)}
+                                className="px-4 py-2 bg-amber-500 text-white rounded-lg text-sm font-semibold hover:bg-amber-600 transition-colors"
+                              >
+                                Depositar
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleDeposit(vault, risk.score)}
+                                className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 transition-colors"
+                              >
+                                Depositar
+                              </button>
+                            )}
+                            {/* Botón de Retirar - solo si el usuario tiene balance */}
+                            {isConnected && address && vault.address && (
+                              <WithdrawButton
+                                vaultAddress={vault.address}
+                                chainId={vault.chainId || 1}
+                                currentChainId={currentChainId}
+                                onWithdraw={handleWithdraw}
+                                getUserVaultBalance={getUserVaultBalance}
+                                vaultBalances={vaultBalances}
+                                loadingBalances={loadingBalances}
+                                setVaultBalances={setVaultBalances}
+                                setLoadingBalances={setLoadingBalances}
+                              />
+                            )}
+                          </>
                         )
                       ) : null}
                     </div>
@@ -621,18 +1077,47 @@ export default function Home() {
                   </div>
                 </div>
 
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Cantidad a depositar ({selectedVault.asset || "tokens"})
-                </label>
-                <input
-                  type="number"
-                  value={depositAmount}
-                  onChange={(e) => setDepositAmount(e.target.value)}
-                  placeholder="0.00"
-                  step="0.01"
-                  min="0"
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
+                {!isConnected ? (
+                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                    <p className="text-sm text-yellow-800 mb-3">
+                      ⚠️ Necesitas conectar tu wallet para continuar
+                    </p>
+                    <button
+                      onClick={async () => {
+                        const connected = await connectWallet();
+                        if (!connected) {
+                          setShowDepositModal(false);
+                        }
+                      }}
+                      className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition-colors"
+                    >
+                      Conectar Wallet
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="mb-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-sm text-gray-600">Wallet conectada:</span>
+                        <span className="text-sm font-mono text-gray-900">
+                          {address?.slice(0, 6)}...{address?.slice(-4)}
+                        </span>
+                      </div>
+                    </div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Cantidad a depositar ({selectedVault.asset || "tokens"})
+                    </label>
+                    <input
+                      type="number"
+                      value={depositAmount}
+                      onChange={(e) => setDepositAmount(e.target.value)}
+                      placeholder="0.00"
+                      step="0.01"
+                      min="0"
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    />
+                  </>
+                )}
               </div>
 
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
@@ -650,9 +1135,10 @@ export default function Home() {
                 </button>
                 <button
                   onClick={confirmDeposit}
-                  className="flex-1 px-4 py-3 bg-emerald-600 text-white rounded-lg font-semibold hover:bg-emerald-700 transition-colors"
+                  disabled={!isConnected || !depositAmount || parseFloat(depositAmount) <= 0}
+                  className="flex-1 px-4 py-3 bg-emerald-600 text-white rounded-lg font-semibold hover:bg-emerald-700 transition-colors disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed"
                 >
-                  Continuar a Morpho
+                  {!isConnected ? "Conecta Wallet" : "Depositar"}
                 </button>
               </div>
             </div>
@@ -718,5 +1204,6 @@ export default function Home() {
         </div>
       </div>
     </div>
+    </>
   );
 }

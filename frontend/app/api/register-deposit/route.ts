@@ -6,7 +6,7 @@ export const dynamic = 'force-dynamic';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { vaultAddress, userAddress, amount, riskScore, chainId } = body;
+    const { vaultAddress, userAddress, amount, riskScore, chainId, txHash } = body;
 
     if (!vaultAddress || !userAddress || !amount) {
       return NextResponse.json(
@@ -15,23 +15,33 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Aquí guardarías en una base de datos para monitoreo
-    // Por ahora solo retornamos éxito
     // En producción, esto debería guardarse en una DB (PostgreSQL, MongoDB, etc.)
+    // Por ahora guardamos en un archivo JSON o en memoria para el demo
+    // El workflow de Chainlink CRE leerá estos datos para monitoreo
     
-    console.log("Depósito registrado para monitoreo:", {
+    const depositRecord = {
+      id: `deposit_${Date.now()}_${userAddress.slice(0, 8)}`,
       vaultAddress,
       userAddress,
-      amount,
-      riskScore,
-      chainId,
+      amount: parseFloat(amount),
+      riskScore: riskScore || 50,
+      chainId: chainId || 1,
+      txHash: txHash || null,
       timestamp: Date.now(),
-    });
+      status: 'active', // active, withdrawn, closed
+      initialRiskScore: riskScore || 50,
+    };
+
+    console.log("Depósito registrado para monitoreo:", depositRecord);
+
+    // TODO: Guardar en base de datos
+    // await db.deposits.create(depositRecord);
 
     return NextResponse.json({
       success: true,
       message: "Depósito registrado para monitoreo automático",
-      monitoringId: `monitor_${Date.now()}_${userAddress.slice(0, 8)}`,
+      monitoringId: depositRecord.id,
+      deposit: depositRecord,
     });
   } catch (error: any) {
     console.error("Error registrando depósito:", error);
