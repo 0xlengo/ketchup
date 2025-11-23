@@ -180,7 +180,7 @@ const fetchTVLData = async (runtime: Runtime<Config>): Promise<{ total: number; 
   // Obtener TVL usando consenso (es un número)
   try {
     const tvlTotal = await httpCapability
-      .sendRequest(runtime, fetchTVL, consensusMedianAggregation())(runtime.config)
+      .sendRequest(runtime, fetchTVL, consensusMedianAggregation())()
       .result();
     
     runtime.log(`✅ TVL obtenido de DeFiLlama: ${tvlTotal}`);
@@ -276,7 +276,7 @@ const evaluateRiskWithAI = async (
   }
 
   try {
-    const prompt = createRiskEvaluationPrompt(priceData, tvlData);
+    const prompt = createRiskEvaluationPrompt(priceData, { total: tvlData.total, protocols: [] });
     
     // Hacer request a OpenAI API usando HTTP capability
     const httpCapability = new cre.capabilities.HTTPClient();
@@ -317,7 +317,7 @@ const evaluateRiskWithAI = async (
     };
     
     const openaiResponse = await httpCapability
-      .sendRequest(runtime, fetchOpenAI, consensusMedianAggregation())(runtime.config)
+      .sendRequest(runtime, fetchOpenAI, consensusMedianAggregation())()
       .result();
 
     const content = openaiResponse.choices[0].message.content;

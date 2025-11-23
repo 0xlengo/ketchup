@@ -1,49 +1,151 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createPublicClient, http, type Address } from "viem";
+import { sepolia, mainnet } from "viem/chains";
 
-// Simulación del workflow (en producción, esto ejecutaría el workflow CRE real)
-// Nota: El workflow real usa Chainlink Data Feeds para obtener precios on-chain
+// ABI del Chainlink Data Feed (AggregatorV3Interface)
+const CHAINLINK_DATA_FEED_ABI = [
+  {
+    inputs: [],
+    name: "latestRoundData",
+    outputs: [
+      { internalType: "uint80", name: "roundId", type: "uint80" },
+      { internalType: "int256", name: "answer", type: "int256" },
+      { internalType: "uint256", name: "startedAt", type: "uint256" },
+      { internalType: "uint256", name: "updatedAt", type: "uint256" },
+      { internalType: "uint80", name: "answeredInRound", type: "uint80" }
+    ],
+    stateMutability: "view",
+    type: "function"
+  },
+  {
+    inputs: [],
+    name: "decimals",
+    outputs: [{ internalType: "uint8", name: "", type: "uint8" }],
+    stateMutability: "view",
+    type: "function"
+  },
+  {
+    inputs: [],
+    name: "description",
+    outputs: [{ internalType: "string", name: "", type: "string" }],
+    stateMutability: "view",
+    type: "function"
+  }
+] as const;
+
+// Direcciones de Chainlink Data Feeds
+const CHAINLINK_FEEDS = {
+  sepolia: {
+    ethUsd: "0x694AA1769357215DE4FAC081bf1f309aDC325306" as Address,
+  },
+  mainnet: {
+    ethUsd: "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419" as Address,
+  },
+};
+
+// Función para obtener precio desde Chainlink Data Feed
+async function fetchPriceFromChainlink(useMainnet: boolean = false): Promise<{ price: number; decimals: number; updatedAt: number }> {
+  const chain = useMainnet ? mainnet : sepolia;
+  const feedAddress = useMainnet ? CHAINLINK_FEEDS.mainnet.ethUsd : CHAINLINK_FEEDS.sepolia.ethUsd;
+  
+  // Crear cliente público (puede usar RPC público o configurado)
+  const publicClient = createPublicClient({
+    chain,
+    transport: http(),
+  });
+
+  try {
+    // Obtener decimals
+    const decimals = await publicClient.readContract({
+      address: feedAddress,
+      abi: CHAINLINK_DATA_FEED_ABI,
+      functionName: "decimals",
+    });
+
+    // Obtener latestRoundData
+    const result = await publicClient.readContract({
+      address: feedAddress,
+      abi: CHAINLINK_DATA_FEED_ABI,
+      functionName: "latestRoundData",
+    }) as [bigint, bigint, bigint, bigint, bigint];
+
+    const [, answer, , updatedAt] = result;
+    
+    // Convertir answer a número con los decimales correctos
+    const price = Number(answer) / Math.pow(10, Number(decimals));
+
+    return {
+      price,
+      decimals: Number(decimals),
+      updatedAt: Number(updatedAt),
+    };
+  } catch (error: any) {
+    console.error("Error leyendo Chainlink Data Feed:", error.message);
+    throw error;
+  }
+}
+
+// Función principal del workflow
 async function simulateWorkflow() {
   try {
-    // Obtener datos de APIs (simulando el workflow)
-    // En producción, el workflow CRE lee directamente de Chainlink Data Feeds on-chain
-    // DeFiLlama API v1: obtener TVL total de Ethereum (más simple y confiable)
-    const tvlResponse = await fetch("https://api.llama.fi/tvl/Ethereum");
+    // Obtener precio desde Chainlink Data Feed (on-chain)
+    let chainlinkPrice = 0;
+    let priceUpdatedAt = 0;
+    let priceDecimals = 8;
     
-    // Para simulación, obtenemos precio de CoinGecko
-    // En producción, el workflow CRE usa Chainlink Data Feed ETH/USD on-chain
-    const priceResponse = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd");
-
-    const priceData = priceResponse.ok
-      ? await priceResponse.json()
-      : null;
+    try {
+      // Intentar primero Sepolia (testnet), si falla intentar Mainnet
+      try {
+        const priceData = await fetchPriceFromChainlink(false); // Sepolia
+        chainlinkPrice = priceData.price;
+        priceUpdatedAt = priceData.updatedAt;
+        priceDecimals = priceData.decimals;
+      } catch (e) {
+        console.log("Intentando Mainnet...");
+        const priceData = await fetchPriceFromChainlink(true); // Mainnet
+        chainlinkPrice = priceData.price;
+        priceUpdatedAt = priceData.updatedAt;
+        priceDecimals = priceData.decimals;
+      }
+    } catch (e) {
+      console.error("Error obteniendo precio de Chainlink:", e);
+      // Continuar sin precio, pero con score reducido
+    }
     
-    // La API v1 retorna solo el número del TVL como texto
-    const tvlText = tvlResponse.ok ? await tvlResponse.text() : "0";
-    const tvlTotal = Number.parseFloat(tvlText) || 0;
+    // Obtener TVL desde DeFiLlama
+    let tvlTotal = 0;
+    try {
+      const tvlResponse = await fetch("https://api.llama.fi/tvl/Ethereum", {
+        cache: 'no-store',
+        headers: {
+          'Accept': 'text/plain',
+        },
+      });
+      
+      if (tvlResponse.ok) {
+        const tvlText = await tvlResponse.text();
+        tvlTotal = Number.parseFloat(tvlText.trim()) || 0;
+      }
+    } catch (e) {
+      console.error("Error obteniendo TVL:", e);
+    }
     
-    // Para obtener el número de protocolos, hacemos otra llamada
+    // Obtener número de protocolos
     let protocolsCount = 0;
     try {
-      const protocolsResponse = await fetch("https://api.llama.fi/protocols");
+      const protocolsResponse = await fetch("https://api.llama.fi/protocols", {
+        cache: 'no-store',
+      });
       if (protocolsResponse.ok) {
         const protocolsData: any = await protocolsResponse.json();
-        // Filtrar solo protocolos de Ethereum
         const ethereumProtocols = Array.isArray(protocolsData) 
           ? protocolsData.filter((p: any) => p.chain === "Ethereum" || p.chains?.includes("Ethereum"))
           : [];
         protocolsCount = ethereumProtocols.length;
       }
     } catch (e) {
-      // Si falla, continuamos sin el número de protocolos
+      console.error("Error obteniendo protocolos:", e);
     }
-    
-    const tvlData = {
-      total: tvlTotal,
-      protocols: protocolsCount,
-    };
-
-    // Nota: En producción, el workflow CRE obtiene precio directamente de Chainlink Data Feed
-    const chainlinkPrice = priceData?.ethereum?.usd || 0;
 
     // Evaluar con OpenAI si está disponible
     let score = 50;
@@ -53,16 +155,20 @@ async function simulateWorkflow() {
     const openaiKey = process.env.OPENAI_API_KEY;
     if (openaiKey && openaiKey !== "your_openai_key_here") {
       try {
+        const priceAge = priceUpdatedAt > 0 
+          ? Math.floor((Date.now() / 1000 - priceUpdatedAt) / 60) 
+          : null;
+        
         const prompt = `Eres un experto analista de riesgo DeFi. Evalúa el riesgo basándote en:
 
-Precio ETH/USD: ${chainlinkPrice} USD (simulado - en producción viene de Chainlink Data Feed)
-TVL Total Ethereum (DeFiLlama): ${tvlData.total.toLocaleString()} USD
-Protocolos activos: ${tvlData.protocols.length}
+Precio ETH/USD (Chainlink Data Feed): ${chainlinkPrice > 0 ? `$${chainlinkPrice.toFixed(2)} USD${priceAge ? ` (actualizado hace ${priceAge} minutos)` : ''}` : 'No disponible'}
+TVL Total Ethereum (DeFiLlama): ${tvlTotal > 0 ? `$${tvlTotal.toLocaleString()} USD` : 'No disponible'}
+Protocolos activos: ${protocolsCount}
 
 Responde SOLO con JSON:
 {
   "score": <0-100>,
-  "reason": "<razón concisa>",
+  "reason": "<razón concisa, máximo 200 caracteres>",
   "factors": {
     "priceStability": <puntos>,
     "tvlLiquidity": <puntos>,
@@ -105,13 +211,13 @@ Responde SOLO con JSON:
       } catch (error: any) {
         console.error("Error en OpenAI:", error.message);
         // Fallback a cálculo basado en reglas
-        const result = calculateRiskScore(priceData, tvlData);
+        const result = calculateRiskScore(chainlinkPrice, { total: tvlTotal, protocols: protocolsCount });
         score = result.score;
         reason = result.reason;
       }
     } else {
       // Cálculo basado en reglas
-      const result = calculateRiskScore(priceData, tvlData);
+      const result = calculateRiskScore(chainlinkPrice, { total: tvlTotal, protocols: protocolsCount });
       score = result.score;
       reason = result.reason;
     }
@@ -122,10 +228,11 @@ Responde SOLO con JSON:
       factors,
       timestamp: Date.now(),
       data: {
-        price: { ethereum: { usd: chainlinkPrice } },
-        tvl: tvlData.total,
-        protocols: tvlData.protocols.length,
-        source: "Chainlink Data Feed + DeFiLlama (simulado en frontend)",
+        price: chainlinkPrice > 0 ? { ethereum: { usd: chainlinkPrice } } : null,
+        tvl: tvlTotal,
+        protocols: protocolsCount,
+        priceUpdatedAt: priceUpdatedAt > 0 ? priceUpdatedAt : undefined,
+        source: "Chainlink Data Feed (on-chain) + DeFiLlama",
       },
     };
   } catch (error: any) {
@@ -134,13 +241,13 @@ Responde SOLO con JSON:
 }
 
 // Función de cálculo basado en reglas (fallback)
-function calculateRiskScore(priceData: any, tvlData: { total: number; protocols: any[] }) {
+function calculateRiskScore(chainlinkPrice: number, tvlData: { total: number; protocols: number }) {
   let score = 50;
   const reasons: string[] = [];
 
-  if (priceData?.ethereum?.usd) {
+  if (chainlinkPrice > 0) {
     score += 20; // Bonus por usar Chainlink Data Feed
-    reasons.push("precio Chainlink confiable");
+    reasons.push("precio Chainlink Data Feed confiable");
   }
 
   const tvlTotal = tvlData.total || 0;
@@ -159,14 +266,14 @@ function calculateRiskScore(priceData: any, tvlData: { total: number; protocols:
   }
   
   // Bonus por diversidad de protocolos
-  if (tvlData.protocols && tvlData.protocols.length > 100) {
+  if (tvlData.protocols && tvlData.protocols > 100) {
     score += 5;
     reasons.push("ecosistema diverso");
   }
   
   // Bonus por usar Chainlink
   score += 10;
-  reasons.push("datos Chainlink + DeFiLlama");
+  reasons.push("datos Chainlink Data Feed + DeFiLlama");
 
   score = Math.max(0, Math.min(100, score));
 

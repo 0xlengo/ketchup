@@ -2,9 +2,13 @@
 
 import { useState } from "react";
 
+// Forzar renderizado dinámico (no pre-renderizar en build)
+export const dynamic = 'force-dynamic';
+
 interface RiskResult {
-  score: number;
+  score: number | null;
   reason: string;
+  error?: string;
   factors?: {
     priceStability?: number;
     tvlLiquidity?: number;
@@ -16,6 +20,9 @@ interface RiskResult {
     price?: any;
     tvl?: number;
     volume?: any;
+    protocols?: number;
+    priceUpdatedAt?: number;
+    source?: string;
   };
 }
 
@@ -61,12 +68,14 @@ export default function Home() {
 
       if (result.error) {
         setError(result.error);
-      } else {
+      } else if (result.score !== null) {
         setScore(result.score);
         setReason(result.reason);
         setFactors(result.factors);
         setData(result.data);
         setTimestamp(result.timestamp || Date.now());
+      } else {
+        setError("No se pudo obtener el score de riesgo");
       }
     } catch (err: any) {
       setError(err.message || "Error al ejecutar la evaluación");
@@ -94,7 +103,7 @@ export default function Home() {
             DeFi Risk Oracle
           </h1>
           <p className="text-gray-600 mb-6">
-            Evaluación de riesgo en tiempo real usando Chainlink CRE y OpenAI
+            Evaluación de riesgo en tiempo real usando Chainlink Data Feeds (on-chain) y OpenAI
           </p>
 
           <button
@@ -150,7 +159,7 @@ export default function Home() {
 
               <div className="mb-4">
                 <div className="flex items-baseline gap-2">
-                  <span className="text-5xl font-bold ${getScoreColor(score)}">
+                  <span className={`text-5xl font-bold ${getScoreColor(score)}`}>
                     {score}
                   </span>
                   <span className="text-2xl text-gray-600">/ 100</span>
@@ -210,16 +219,31 @@ export default function Home() {
                 <div className="mb-4 p-4 bg-gray-50 rounded-lg">
                   <h3 className="font-semibold text-gray-700 mb-2">📈 Datos Utilizados:</h3>
                   <div className="text-sm space-y-1">
-                    {data.price && (
+                    {data.price && data.price.ethereum?.usd ? (
                       <p>
-                        <span className="font-medium">Precio ETH:</span>{" "}
-                        ${data.price.ethereum?.usd?.toLocaleString() || "N/A"}
+                        <span className="font-medium">Precio ETH/USD (Chainlink Data Feed):</span>{" "}
+                        ${data.price.ethereum.usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        {data.priceUpdatedAt && (
+                          <span className="text-xs text-gray-500 ml-2">
+                            (actualizado hace {Math.floor((Date.now() / 1000 - data.priceUpdatedAt) / 60)} min)
+                          </span>
+                        )}
+                      </p>
+                    ) : (
+                      <p>
+                        <span className="font-medium">Precio ETH/USD (Chainlink Data Feed):</span>{" "}
+                        <span className="text-gray-400">Cargando desde blockchain...</span>
                       </p>
                     )}
-                    {data.tvl !== undefined && (
+                    {data.tvl !== undefined && data.tvl > 0 ? (
                       <p>
                         <span className="font-medium">TVL Total (DeFiLlama):</span>{" "}
                         ${data.tvl.toLocaleString()} USD
+                      </p>
+                    ) : (
+                      <p>
+                        <span className="font-medium">TVL Total (DeFiLlama):</span>{" "}
+                        <span className="text-gray-400">Cargando...</span>
                       </p>
                     )}
                     {data.protocols !== undefined && (
@@ -255,11 +279,28 @@ export default function Home() {
           <div className="mt-8 p-4 bg-blue-50 rounded-lg">
             <h3 className="font-semibold text-blue-900 mb-2">ℹ️ Sobre esta Evaluación</h3>
             <ul className="text-sm text-blue-800 space-y-1">
-              <li>• Utiliza datos en tiempo real de CoinGecko y Llama.fi</li>
+              <li>• Utiliza Chainlink Data Feeds para precios on-chain (descentralizado y confiable)</li>
+              <li>• Datos de TVL desde DeFiLlama</li>
               <li>• Evaluación con OpenAI GPT-4o-mini (si está configurado)</li>
               <li>• Score de 0-100: &lt;50 Riesgoso, 50-70 Moderado, &gt;70 Seguro</li>
               <li>• Los datos se actualizan en cada ejecución</li>
             </ul>
+          </div>
+
+          <div className="mt-6 p-6 bg-gradient-to-r from-purple-50 to-pink-50 rounded-lg border-2 border-purple-200">
+            <h3 className="font-semibold text-purple-900 mb-3 text-xl">
+              🏦 Agregador de Vaults DeFi
+            </h3>
+            <p className="text-purple-800 mb-4">
+              Explora y evalúa la salud de vaults de Morpho y otros protocolos DeFi con nuestro
+              sistema de semáforos visuales.
+            </p>
+            <a
+              href="/vaults"
+              className="inline-block px-6 py-3 bg-purple-600 text-white rounded-lg font-semibold hover:bg-purple-700 transition-all active:scale-95"
+            >
+              🚀 Ver Agregador de Vaults →
+            </a>
           </div>
         </div>
       </div>
