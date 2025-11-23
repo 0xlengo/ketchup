@@ -6,11 +6,9 @@ MVP para hackathon que utiliza Chainlink CRE (Compute Runtime Environment) para 
 
 DeFi Risk Oracle es un sistema que:
 - Obtiene datos de precio y TVL de APIs externas (CoinGecko, Llama.fi) usando consenso distribuido
-- Calcula un score de riesgo basado en análisis de datos (0-100)
+- Utiliza OpenAI GPT-4o-mini para analizar y evaluar el riesgo (0-100)
 - Actualiza un smart contract en la blockchain con el score de riesgo y la razón
-- Proporciona una interfaz web para consultar y ejecutar evaluaciones
-
-**Nota**: El workflow actual calcula el score usando lógica basada en reglas. Puede ser extendido para usar servicios de AI externos si es necesario.
+- Proporciona una interfaz web en tiempo real para consultar y ejecutar evaluaciones
 
 ## 🏗️ Estructura del Proyecto
 
@@ -25,6 +23,10 @@ DeFi Risk Oracle es un sistema que:
     /app
       page.tsx
       api/run-check/route.ts
+  /test               # Tests unitarios
+    RiskOracle.test.ts
+  /docs               # Documentación
+    WORKFLOW_FLOW.md  # Diagrama de flujo visual
   /ketchup-workflow   # Entorno de pruebas CRE CLI (no modificar)
   hardhat.config.ts
   package.json
@@ -52,24 +54,41 @@ bun install
 cd ..
 ```
 
+## 🔧 Configuración
+
+### Variables de Entorno
+
+Crea un archivo `.env` en la raíz del proyecto basado en `.env.example`:
+
+```bash
+cp .env.example .env
+```
+
+Luego edita `.env` y agrega tus claves:
+- `INFURA_KEY`: Tu API key de Infura para Sepolia (obtén una en https://infura.io)
+- `PRIVATE_KEY`: Tu clave privada para desplegar contratos (sin prefijo 0x)
+- `OPENAI_API_KEY`: Tu API key de OpenAI para evaluación de riesgo (obtén una en https://platform.openai.com)
+
+**⚠️ Importante**: 
+- Reemplaza los valores placeholder (`your_infura_key_here`, `your_private_key_here`) con valores reales
+- Si no configuras `INFURA_KEY`, Hardhat usará un RPC público de Sepolia (puede ser más lento)
+- Si no configuras `PRIVATE_KEY`, no podrás desplegar contratos
+- Si no configuras `OPENAI_API_KEY`, el sistema usará cálculo basado en reglas
+
 ## 📝 Uso
 
-### Simular el Workflow con CRE CLI
-
-Para probar el workflow usando el entorno de pruebas:
+### Ejecutar Tests
 
 ```bash
-# Desde la raíz del proyecto
-cre workflow simulate ./workflow/risk-evaluator.ts
+npm test
 ```
 
-O usando el entorno ketchup-workflow:
-
-```bash
-# Copiar el workflow a ketchup-workflow para pruebas
-cp workflow/risk-evaluator.ts ketchup-workflow/
-cre workflow simulate ketchup-workflow
-```
+Los tests cubren:
+- Deployment del contrato
+- Actualización de risk score
+- Eventos emitidos
+- Función `isRisky()`
+- Casos límite
 
 ### Compilar los Smart Contracts
 
@@ -78,12 +97,6 @@ npm run compile
 ```
 
 Los artefactos compilados se generarán en `./artifacts/`.
-
-### Ejecutar Tests (si los hay)
-
-```bash
-npm test
-```
 
 ### Ejecutar el Frontend
 
@@ -94,52 +107,141 @@ npm run dev
 
 2. Abrir el navegador en `http://localhost:3000`
 
-3. Hacer clic en "Run Risk Check" para ejecutar una evaluación (actualmente devuelve datos mock)
+3. Hacer clic en "🚀 Ejecutar Evaluación de Riesgo" para ejecutar una evaluación en tiempo real
 
-### Build de Producción del Frontend
+El frontend:
+- Obtiene datos en tiempo real de CoinGecko y Llama.fi
+- Usa OpenAI para evaluación (si está configurado)
+- Muestra score, razón, factores y datos utilizados
+- Interfaz visual con colores según el nivel de riesgo
+
+### Simular el Workflow con CRE CLI
+
+Para probar el workflow usando el entorno de pruebas:
 
 ```bash
-npm run build
-npm start
+# Desde la raíz del proyecto
+cre workflow simulate ./workflow
 ```
 
-## 🔧 Configuración
+O usando el script:
 
-### Workflow Config
+```bash
+./workflow/test-simulation.sh
+```
 
-El archivo `workflow/config.json` contiene la configuración del workflow. Actualmente incluye un schedule para ejecución periódica.
+### Deploy Contract
 
-### Hardhat Config
+1. Asegúrate de tener configurado `.env` con `INFURA_KEY` y `PRIVATE_KEY`
 
-El archivo `hardhat.config.ts` está configurado para:
-- Compilar Solidity 0.8.20
-- Usar optimizador con 200 runs
-- Red local Hardhat (chainId: 1337)
+2. Compila el contrato:
+```bash
+npm run compile
+```
+
+3. Despliega el contrato en Sepolia:
+```bash
+npx hardhat run scripts/deploy-contract.ts --network sepolia
+```
+
+El script automáticamente:
+- Despliega el contrato `RiskOracle`
+- Actualiza `cre.json` con la nueva dirección
+- Actualiza `workflow/config.json` con la nueva dirección
+- Genera el ABI en `contracts/RiskOracle.json`
+
+### Deploy Workflow
+
+Una vez que el contrato esté desplegado y los archivos de configuración actualizados:
+
+```bash
+cre workflow deploy ./workflow/risk-evaluator.ts \
+  --config ./workflow/config.json \
+  --cre-config ./cre.json
+```
+
+O usando el script:
+
+```bash
+./workflow/deploy-workflow.sh
+```
+
+## 🧪 Testing & Deployment
+
+### Testing the Workflow (Simulation)
+
+Para simular el workflow localmente antes de desplegarlo:
+
+```bash
+cre workflow simulate ./workflow/risk-evaluator.ts \
+  --config ./workflow/config.json \
+  --cre-config ./cre.json
+```
+
+O usando el script de simulación:
+
+```bash
+./workflow/test-simulation.sh
+```
+
+### Probar Conexión OpenAI
+
+```bash
+npm run test:openai
+```
+
+Este script verifica que tu API key de OpenAI esté configurada y funcionando.
+
+## 📊 Flujo del Workflow
+
+Ver el diagrama completo en [`docs/WORKFLOW_FLOW.md`](./docs/WORKFLOW_FLOW.md)
+
+### Resumen del Flujo:
+
+1. **Trigger**: Cron schedule ejecuta el workflow periódicamente
+2. **Obtención de Datos**: Múltiples APIs (CoinGecko, Llama.fi) con consenso distribuido
+3. **Evaluación**: OpenAI GPT-4o-mini analiza los datos y genera score (0-100)
+4. **On-Chain**: Escribe el resultado al contrato `RiskOracle` en Sepolia
+5. **Frontend**: Muestra resultados en tiempo real con interfaz visual
 
 ## 📦 Dependencias Principales
 
 - **@chainlink/cre-sdk**: SDK de Chainlink CRE para workflows
 - **viem**: Biblioteca para interactuar con Ethereum (usada por CRE SDK)
-- **hardhat**: Framework de desarrollo para Ethereum
+- **hardhat**: Framework de desarrollo para Ethereum (v3)
 - **ethers**: Biblioteca para interactuar con Ethereum
 - **next**: Framework React para producción
 - **react**: Biblioteca UI
+- **openai**: Para evaluación de riesgo con AI
+
+## 🎨 Características del Frontend
+
+- ✅ Interfaz moderna y responsive
+- ✅ Evaluación en tiempo real
+- ✅ Visualización de score con colores (verde/amarillo/rojo)
+- ✅ Muestra factores de evaluación
+- ✅ Datos utilizados en la evaluación
+- ✅ Timestamp de la evaluación
+- ✅ Estados de carga y error
 
 ## 🔐 Notas de Seguridad
 
-- El endpoint `/api/run-check` actualmente devuelve datos mock
-- Para producción, necesitarás integrar la ejecución real del workflow CRE
-- Asegúrate de configurar las variables de entorno necesarias (API keys, private keys, etc.)
+- El endpoint `/api/run-check` ejecuta una simulación del workflow
+- Para producción, integra con el workflow CRE desplegado
+- Asegúrate de configurar las variables de entorno necesarias
+- Nunca commitees el archivo `.env` con claves reales
 
 ## 🚧 Próximos Pasos
 
-1. Integrar la ejecución real del workflow CRE en el endpoint API
-2. Conectar el frontend con el smart contract desplegado
-3. Agregar autenticación y rate limiting
-4. Implementar historial de evaluaciones
-5. Agregar más fuentes de datos para el análisis de riesgo
+1. ✅ Tests unitarios completos
+2. ✅ Diagrama de flujo visual
+3. ✅ Prompts mejorados para LLM
+4. ✅ Integración frontend en tiempo real
+5. ⏳ Integrar con workflow CRE desplegado (en lugar de simulación)
+6. ⏳ Agregar WebSocket para actualizaciones en tiempo real
+7. ⏳ Historial de evaluaciones
+8. ⏳ Alertas cuando el score cambia significativamente
 
 ## 📄 Licencia
 
 MIT
-

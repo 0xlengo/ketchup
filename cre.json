@@ -1,0 +1,10 @@
+{
+  "contracts": {
+    "RiskOracle": {
+      "chain": "sepolia",
+      "abi": "./contracts/RiskOracle.json",
+      "address": "0x0000000000000000000000000000000000000000"
+    }
+  }
+}
+
