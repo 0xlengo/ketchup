@@ -1,0 +1,7 @@
+{
+  "schedule": "0 */6 * * *",
+  "evm": {
+    "chainSelectorName": "ethereum-testnet-sepolia",
+    "contractAddress": "0x0000000000000000000000000000000000000000"
+  }
+}

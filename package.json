@@ -1,0 +1,30 @@
+{
+  "name": "defi-risk-oracle",
+  "version": "1.0.0",
+  "description": "DeFi Risk Oracle MVP using Chainlink CRE",
+  "private": true,
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "dev": "cd frontend && next dev",
+    "build": "cd frontend && next build",
+    "start": "cd frontend && next start"
+  },
+  "dependencies": {
+    "@chainlink/cre-sdk": "^1.0.0",
+    "next": "^14.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "viem": "^2.34.0"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "ethers": "^6.9.0",
+    "hardhat": "^2.19.0",
+    "typescript": "^5.3.0"
+  }
+}
+

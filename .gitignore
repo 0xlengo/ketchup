@@ -1,0 +1,43 @@
+*.env
+.env.local
+.env*.local
+
+# Dependencies
+node_modules/
+frontend/node_modules/
+ketchup-workflow/node_modules/
+
+# Build outputs
+dist/
+build/
+frontend/.next/
+frontend/out/
+artifacts/
+cache/
+typechain-types/
+
+# Hardhat
+coverage/
+coverage.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary files
+tmp.*
+*.wasm
+!ketchup-workflow/dist/*.wasm
