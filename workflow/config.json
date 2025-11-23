@@ -16,6 +16,9 @@
   },
   "evm": {
     "chainSelectorName": "ethereum-testnet-sepolia",
-    "contractAddress": "0x0000000000000000000000000000000000000000"
+    "contractAddress": "0x0000000000000000000000000000000000000000",
+    "dataFeeds": {
+      "ethUsd": "0x694AA1769357215DE4FAC081bf1f309aDC325306"
+    }
   }
 }

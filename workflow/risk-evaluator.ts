@@ -1,11 +1,14 @@
-import { cre, Runner, type Runtime, prepareReportRequest, getNetwork, type HTTPSendRequester, ok, text, consensusMedianAggregation } from "@chainlink/cre-sdk";
-import { encodeFunctionData, zeroAddress, type Address } from "viem";
+import { cre, Runner, type Runtime, prepareReportRequest, getNetwork, encodeCallMsg, bytesToHex, LAST_FINALIZED_BLOCK_NUMBER, consensusMedianAggregation, type HTTPSendRequester, ok, text } from "@chainlink/cre-sdk";
+import { encodeFunctionData, decodeFunctionResult, zeroAddress, type Address } from "viem";
 
 type Config = {
   schedule: string;
   evm: {
     chainSelectorName: string;
     contractAddress: string;
+    dataFeeds?: {
+      ethUsd?: string; // Address del Data Feed ETH/USD
+    };
   };
   openai?: {
     model?: string;
@@ -27,106 +30,221 @@ const RISK_ORACLE_ABI = [
   }
 ] as const;
 
-// Función para obtener datos de precio
-const fetchPriceData = (sendRequester: HTTPSendRequester) => {
-  const response = sendRequester
-    .sendRequest({ 
-      url: "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd",
-      method: "GET" 
+// ABI del Chainlink Data Feed (AggregatorV3Interface)
+const CHAINLINK_DATA_FEED_ABI = [
+  {
+    inputs: [],
+    name: "latestRoundData",
+    outputs: [
+      { internalType: "uint80", name: "roundId", type: "uint80" },
+      { internalType: "int256", name: "answer", type: "int256" },
+      { internalType: "uint256", name: "startedAt", type: "uint256" },
+      { internalType: "uint256", name: "updatedAt", type: "uint256" },
+      { internalType: "uint80", name: "answeredInRound", type: "uint80" }
+    ],
+    stateMutability: "view",
+    type: "function"
+  },
+  {
+    inputs: [],
+    name: "decimals",
+    outputs: [{ internalType: "uint8", name: "", type: "uint8" }],
+    stateMutability: "view",
+    type: "function"
+  },
+  {
+    inputs: [],
+    name: "description",
+    outputs: [{ internalType: "string", name: "", type: "string" }],
+    stateMutability: "view",
+    type: "function"
+  }
+] as const;
+
+// Función para obtener precio desde Chainlink Data Feed
+const fetchPriceFromChainlink = async (
+  runtime: Runtime<Config>,
+  dataFeedAddress: string
+): Promise<{ price: number; decimals: number; updatedAt: number }> => {
+  const { chainSelectorName } = runtime.config.evm;
+  
+  const network = getNetwork({
+    chainFamily: "evm",
+    chainSelectorName,
+    isTestnet: true,
+  });
+
+  if (!network) {
+    throw new Error(`Network not found: ${chainSelectorName}`);
+  }
+
+  const evmClient = new cre.capabilities.EVMClient(
+    network.chainSelector.selector
+  );
+
+  // Obtener decimals del Data Feed
+  const decimalsData = encodeFunctionData({
+    abi: CHAINLINK_DATA_FEED_ABI,
+    functionName: "decimals",
+  });
+
+  const decimalsCall = evmClient
+    .callContract(runtime, {
+      call: encodeCallMsg({
+        from: zeroAddress,
+        to: dataFeedAddress as Address,
+        data: decimalsData,
+      }),
+      blockNumber: LAST_FINALIZED_BLOCK_NUMBER,
     })
     .result();
 
-  if (!ok(response)) {
-    throw new Error(`Price API failed with status: ${response.statusCode}`);
-  }
+  const decimals = Number(decodeFunctionResult({
+    abi: CHAINLINK_DATA_FEED_ABI,
+    functionName: "decimals",
+    data: bytesToHex(decimalsCall.data),
+  }));
 
-  return JSON.parse(text(response));
-};
+  // Obtener latestRoundData
+  const latestRoundData = encodeFunctionData({
+    abi: CHAINLINK_DATA_FEED_ABI,
+    functionName: "latestRoundData",
+  });
 
-// Función para obtener datos de TVL
-const fetchTVLData = (sendRequester: HTTPSendRequester) => {
-  const response = sendRequester
-    .sendRequest({ 
-      url: "https://api.llama.fi/tvl/ethereum",
-      method: "GET" 
+  const priceCall = evmClient
+    .callContract(runtime, {
+      call: encodeCallMsg({
+        from: zeroAddress,
+        to: dataFeedAddress as Address,
+        data: latestRoundData,
+      }),
+      blockNumber: LAST_FINALIZED_BLOCK_NUMBER,
     })
     .result();
 
-  if (!ok(response)) {
-    return 0;
-  }
+  const result = decodeFunctionResult({
+    abi: CHAINLINK_DATA_FEED_ABI,
+    functionName: "latestRoundData",
+    data: bytesToHex(priceCall.data),
+  }) as [bigint, bigint, bigint, bigint, bigint];
 
-  const tvlText = text(response);
-  return tvlText ? Number.parseFloat(tvlText) : 0;
-};
+  const [, answer, , updatedAt] = result;
+  
+  // Convertir answer a número con los decimales correctos
+  const price = Number(answer) / Math.pow(10, decimals);
 
-// Función para obtener datos de volumen de trading
-const fetchVolumeData = (sendRequester: HTTPSendRequester) => {
-  const response = sendRequester
-    .sendRequest({ 
-      url: "https://api.coingecko.com/api/v3/coins/ethereum?localization=false&tickers=false&market_data=true",
-      method: "GET" 
-    })
-    .result();
-
-  if (!ok(response)) {
-    return null;
-  }
-
-  const data = JSON.parse(text(response));
   return {
-    priceChange24h: data.market_data?.price_change_percentage_24h || 0,
-    volume24h: data.market_data?.total_volume?.usd || 0,
-    marketCap: data.market_data?.market_cap?.usd || 0,
+    price,
+    decimals,
+    updatedAt: Number(updatedAt),
   };
+};
+
+// Función para obtener datos de TVL desde DeFiLlama
+const fetchTVLData = async (runtime: Runtime<Config>): Promise<{ total: number; protocols: number }> => {
+  // Usamos HTTPClient pero solo para obtener el TVL numérico, luego hacemos otra llamada para protocolos
+  const httpCapability = new cre.capabilities.HTTPClient();
+  
+  const fetchTVL = (sendRequester: HTTPSendRequester) => {
+    // DeFiLlama API v2: obtener TVL de todas las chains y buscar Ethereum
+    const response = sendRequester
+      .sendRequest({
+        url: "https://api.llama.fi/v2/chains",
+        method: "GET",
+      })
+      .result();
+
+    if (!ok(response)) {
+      return 0;
+    }
+
+    // La API v2 retorna un array de chains con TVL
+    const dataText = text(response);
+    try {
+      const chains = JSON.parse(dataText);
+      if (Array.isArray(chains)) {
+        // Buscar Ethereum por nombre o chainId
+        const ethereum = chains.find((chain: any) => 
+          chain.name === "Ethereum" || chain.chainId === 1 || chain.gecko_id === "ethereum"
+        );
+        return ethereum?.tvl || 0;
+      }
+    } catch (e) {
+      // Si falla el parse, retornar 0
+      return 0;
+    }
+    
+    return 0;
+  };
+  
+  // Obtener TVL usando consenso (es un número)
+  try {
+    const tvlTotal = await httpCapability
+      .sendRequest(runtime, fetchTVL, consensusMedianAggregation())(runtime.config)
+      .result();
+    
+    runtime.log(`✅ TVL obtenido de DeFiLlama: ${tvlTotal}`);
+    
+    return {
+      total: tvlTotal || 0,
+      protocols: 0, // Se puede agregar después si es necesario
+    };
+  } catch (error: any) {
+    runtime.log(`⚠️  Error obteniendo TVL: ${error.message}`);
+    return {
+      total: 0,
+      protocols: 0,
+    };
+  }
 };
 
 // Prompt mejorado para evaluación de riesgo con LLM
 const createRiskEvaluationPrompt = (
-  priceData: any,
-  tvlData: number,
-  volumeData: any
+  priceData: { price: number; updatedAt: number },
+  tvlData: { total: number; protocols: any[] }
 ): string => {
-  return `Eres un experto analista de riesgo DeFi. Evalúa el riesgo de un protocolo DeFi basándote en los siguientes datos:
+  const priceAge = Math.floor((Date.now() / 1000 - priceData.updatedAt) / 60); // minutos
+  
+  return `Eres un experto analista de riesgo DeFi. Evalúa el riesgo de un protocolo DeFi basándote en los siguientes datos de Chainlink y DeFiLlama:
 
 ## Datos del Protocolo:
 
-**Precio (ETH/USD):**
-${JSON.stringify(priceData, null, 2)}
+**Precio ETH/USD (Chainlink Data Feed):**
+${priceData.price.toFixed(2)} USD
+Actualizado hace: ${priceAge} minutos
 
-**TVL (Total Value Locked):**
-${tvlData.toLocaleString()} USD
-
-**Datos de Volumen y Mercado:**
-${volumeData ? JSON.stringify(volumeData, null, 2) : "No disponible"}
+**TVL Total Ethereum (DeFiLlama):**
+${tvlData.total.toLocaleString()} USD
+Número de protocolos: ${tvlData.protocols.length}
 
 ## Criterios de Evaluación:
 
 1. **Estabilidad de Precio (0-30 puntos)**:
-   - Precio estable (±1%): 25-30 puntos
-   - Pequeña volatilidad (±5%): 15-24 puntos
-   - Alta volatilidad (>5%): 0-14 puntos
+   - Precio de Chainlink (fuente confiable): +10 puntos base
+   - Precio actualizado (< 1 hora): 15-20 puntos adicionales
+   - Precio actualizado (1-4 horas): 10-14 puntos adicionales
+   - Precio desactualizado (> 4 horas): 0-9 puntos adicionales
 
 2. **TVL y Liquidez (0-30 puntos)**:
    - TVL > $1B: 25-30 puntos
    - TVL $100M-$1B: 15-24 puntos
    - TVL < $100M: 0-14 puntos
 
-3. **Volumen de Trading (0-20 puntos)**:
-   - Volumen alto y consistente: 15-20 puntos
-   - Volumen moderado: 8-14 puntos
-   - Volumen bajo: 0-7 puntos
+3. **Confiabilidad de Datos (0-20 puntos)**:
+   - Usando Chainlink Data Feeds (oráculo descentralizado): 15-20 puntos
+   - Datos on-chain verificables: +5 puntos
 
 4. **Tendencias de Mercado (0-20 puntos)**:
-   - Tendencia positiva estable: 15-20 puntos
-   - Tendencia neutra: 8-14 puntos
-   - Tendencia negativa: 0-7 puntos
+   - Basado en precio Chainlink y TVL estable: 15-20 puntos
+   - Datos mixtos: 8-14 puntos
+   - Señales de riesgo: 0-7 puntos
 
 ## Instrucciones:
 
 1. Analiza cada criterio y asigna puntos según los datos proporcionados
 2. Calcula el score total (0-100)
 3. Proporciona una razón concisa (máximo 200 caracteres) explicando los factores principales
+4. Destaca el uso de Chainlink Data Feeds como fuente confiable
 
 ## Formato de Respuesta (JSON estricto):
 
@@ -136,7 +254,7 @@ ${volumeData ? JSON.stringify(volumeData, null, 2) : "No disponible"}
   "factors": {
     "priceStability": <puntos>,
     "tvlLiquidity": <puntos>,
-    "tradingVolume": <puntos>,
+    "dataReliability": <puntos>,
     "marketTrend": <puntos>
   }
 }
@@ -147,62 +265,59 @@ IMPORTANTE: Responde SOLO con el JSON, sin texto adicional.`;
 // Función para evaluar riesgo usando OpenAI
 const evaluateRiskWithAI = async (
   runtime: Runtime<Config>,
-  priceData: any,
-  tvlData: number,
-  volumeData: any
-): Promise<{ score: number; reason: string }> => {
+  priceData: { price: number; updatedAt: number },
+  tvlData: { total: number; protocols: number }
+): Promise<{ score: number; reason: string; factors?: any }> => {
   const useAI = runtime.config.openai?.enabled !== false;
   
   if (!useAI) {
     runtime.log("AI deshabilitada, usando cálculo basado en reglas");
-    return calculateRiskScore(priceData, tvlData, volumeData);
+    return calculateRiskScore(priceData, tvlData);
   }
 
   try {
-    const prompt = createRiskEvaluationPrompt(priceData, tvlData, volumeData);
+    const prompt = createRiskEvaluationPrompt(priceData, tvlData);
     
-    // Hacer request a OpenAI API
+    // Hacer request a OpenAI API usando HTTP capability
     const httpCapability = new cre.capabilities.HTTPClient();
     const model = runtime.config.openai?.model || "gpt-4o-mini";
     
-    const openaiResponse = await httpCapability
-      .sendRequest(
-        runtime,
-        (sendRequester: HTTPSendRequester) => {
-          const response = sendRequester
-            .sendRequest({
-              url: "https://api.openai.com/v1/chat/completions",
-              method: "POST",
-              headers: {
-                "Authorization": `Bearer ${process.env.OPENAI_API_KEY || ""}`,
-                "Content-Type": "application/json",
+    const fetchOpenAI = (sendRequester: HTTPSendRequester) => {
+      const response = sendRequester
+        .sendRequest({
+          url: "https://api.openai.com/v1/chat/completions",
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${process.env.OPENAI_API_KEY || ""}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: model,
+            messages: [
+              {
+                role: "system",
+                content: "Eres un analista de riesgo DeFi experto. Responde siempre en formato JSON válido."
               },
-              body: JSON.stringify({
-                model: model,
-                messages: [
-                  {
-                    role: "system",
-                    content: "Eres un analista de riesgo DeFi experto. Responde siempre en formato JSON válido."
-                  },
-                  {
-                    role: "user",
-                    content: prompt
-                  }
-                ],
-                temperature: 0.3,
-                max_tokens: 300,
-              }),
-            })
-            .result();
+              {
+                role: "user",
+                content: prompt
+              }
+            ],
+            temperature: 0.3,
+            max_tokens: 300,
+          }),
+        })
+        .result();
 
-          if (!ok(response)) {
-            throw new Error(`OpenAI API failed with status: ${response.statusCode}`);
-          }
+      if (!ok(response)) {
+        throw new Error(`OpenAI API failed with status: ${response.statusCode}`);
+      }
 
-          return JSON.parse(text(response));
-        },
-        consensusMedianAggregation()
-      )(runtime.config)
+      return JSON.parse(text(response));
+    };
+    
+    const openaiResponse = await httpCapability
+      .sendRequest(runtime, fetchOpenAI, consensusMedianAggregation())(runtime.config)
       .result();
 
     const content = openaiResponse.choices[0].message.content;
@@ -213,108 +328,103 @@ const evaluateRiskWithAI = async (
     return {
       score: Math.max(0, Math.min(100, parsed.score)),
       reason: parsed.reason || "Evaluación AI completada",
+      factors: parsed.factors,
     };
   } catch (error: any) {
     runtime.log(`Error en evaluación AI: ${error.message}, usando cálculo basado en reglas`);
-    return calculateRiskScore(priceData, tvlData, volumeData);
+    const result = calculateRiskScore(priceData, tvlData);
+    return {
+      ...result,
+      factors: {},
+    };
   }
 };
 
 // Calcular score de riesgo basado en reglas (fallback)
 const calculateRiskScore = (
-  priceData: any,
-  tvlData: number,
-  volumeData: any
+  priceData: { price: number; updatedAt: number },
+  tvlData: { total: number; protocols: number }
 ): { score: number; reason: string } => {
   let score = 50; // Score base
   const reasons: string[] = [];
 
-  // Evaluar estabilidad de precio
-  if (priceData && priceData.ethereum) {
-    const price = priceData.ethereum.usd || 0;
-    if (price > 0) {
+  // Evaluar precio de Chainlink (fuente confiable)
+  if (priceData.price > 0) {
+    score += 20; // Bonus por usar Chainlink
+    reasons.push("precio Chainlink confiable");
+    
+    // Verificar actualización
+    const priceAge = Math.floor((Date.now() / 1000 - priceData.updatedAt) / 60);
+    if (priceAge < 60) {
       score += 15;
-      reasons.push("precio disponible");
+      reasons.push("precio actualizado");
+    } else if (priceAge < 240) {
+      score += 10;
+      reasons.push("precio reciente");
+    } else {
+      score += 5;
+      reasons.push("precio desactualizado");
     }
   }
 
-  // Evaluar TVL
-  if (tvlData > 1000000000) { // > $1B
+  // Evaluar TVL (DeFiLlama)
+  const tvlTotal = tvlData.total || 0;
+  if (tvlTotal > 10000000000) { // > $10B
+    score += 30;
+    reasons.push("TVL muy alto (DeFiLlama)");
+  } else if (tvlTotal > 1000000000) { // > $1B
     score += 25;
-    reasons.push("TVL muy alto");
-  } else if (tvlData > 100000000) { // > $100M
+    reasons.push("TVL alto (DeFiLlama)");
+  } else if (tvlTotal > 100000000) { // > $100M
     score += 15;
-    reasons.push("TVL alto");
-  } else if (tvlData > 10000000) { // > $10M
-    score += 10;
-    reasons.push("TVL moderado");
-  } else if (tvlData > 0) {
+    reasons.push("TVL moderado (DeFiLlama)");
+  } else if (tvlTotal > 0) {
     score += 5;
-    reasons.push("TVL bajo");
+    reasons.push("TVL bajo (DeFiLlama)");
   } else {
     score -= 10;
     reasons.push("TVL no disponible");
   }
-
-  // Evaluar volumen si está disponible
-  if (volumeData) {
-    if (volumeData.volume24h > 1000000000) { // > $1B
-      score += 15;
-      reasons.push("volumen alto");
-    } else if (volumeData.volume24h > 100000000) { // > $100M
-      score += 10;
-      reasons.push("volumen moderado");
-    }
-
-    // Evaluar cambio de precio
-    const priceChange = Math.abs(volumeData.priceChange24h || 0);
-    if (priceChange < 2) {
-      score += 10;
-      reasons.push("precio estable");
-    } else if (priceChange > 10) {
-      score -= 15;
-      reasons.push("alta volatilidad");
-    }
+  
+  // Bonus por diversidad de protocolos
+  if (tvlData.protocols > 100) {
+    score += 5;
+    reasons.push("ecosistema diverso");
   }
+
+  // Bonus por usar Chainlink Data Feeds
+  score += 10;
+  reasons.push("datos Chainlink");
 
   // Asegurar que el score esté entre 0 y 100
   score = Math.max(0, Math.min(100, score));
 
   return {
     score: Math.round(score),
-    reason: reasons.join(", ") || "evaluación basada en datos disponibles"
+    reason: reasons.join(", ") || "evaluación basada en datos Chainlink"
   };
 };
 
 const onCronTrigger = async (runtime: Runtime<Config>) => {
-  runtime.log("🚀 Iniciando evaluación de riesgo DeFi...");
+  runtime.log("🚀 Iniciando evaluación de riesgo DeFi con Chainlink Data Feeds...");
 
-  const { chainSelectorName, contractAddress } = runtime.config.evm;
+  const { chainSelectorName, contractAddress, dataFeeds } = runtime.config.evm;
 
-  // Obtener datos usando HTTP con consenso
-  const httpCapability = new cre.capabilities.HTTPClient();
+  // Obtener precio desde Chainlink Data Feed
+  const ethUsdFeed = dataFeeds?.ethUsd || getDefaultDataFeedAddress(chainSelectorName);
   
-  runtime.log("📊 Obteniendo datos de precio...");
-  const priceData = await httpCapability
-    .sendRequest(runtime, fetchPriceData, consensusMedianAggregation())(runtime.config)
-    .result();
+  runtime.log(`📊 Obteniendo precio ETH/USD desde Chainlink Data Feed: ${ethUsdFeed}`);
+  const priceData = await fetchPriceFromChainlink(runtime, ethUsdFeed);
+  runtime.log(`✅ Precio Chainlink: $${priceData.price.toFixed(2)} USD (decimals: ${priceData.decimals})`);
 
-  runtime.log("💰 Obteniendo datos de TVL...");
-  const tvlData = await httpCapability
-    .sendRequest(runtime, fetchTVLData, consensusMedianAggregation())(runtime.config)
-    .result();
-
-  runtime.log("📈 Obteniendo datos de volumen...");
-  const volumeData = await httpCapability
-    .sendRequest(runtime, fetchVolumeData, consensusMedianAggregation())(runtime.config)
-    .result()
-    .catch(() => null);
-
-  runtime.log(`✅ Datos obtenidos - Precio: ${JSON.stringify(priceData)}, TVL: ${tvlData.toLocaleString()}`);
+  runtime.log("💰 Obteniendo datos de TVL desde DeFiLlama...");
+  const tvlData = await fetchTVLData(runtime);
+  runtime.log(`✅ TVL Total (DeFiLlama): $${tvlData.total.toLocaleString()} USD`);
+  runtime.log(`✅ Protocolos activos en Ethereum: ${tvlData.protocols || 'N/A'}`);
 
   // Evaluar riesgo (con AI si está habilitado)
   runtime.log("🤖 Evaluando riesgo...");
-  const { score, reason } = await evaluateRiskWithAI(runtime, priceData, tvlData, volumeData);
+  const { score, reason, factors } = await evaluateRiskWithAI(runtime, priceData, tvlData);
   
   runtime.log(`📊 Score calculado: ${score}/100`);
   runtime.log(`📝 Razón: ${reason}`);
@@ -346,8 +456,30 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
     runtime.log(`⚠️  Contrato no configurado, saltando escritura on-chain`);
   }
 
-  return { score, reason, timestamp: Date.now() };
+  return { 
+    score, 
+    reason, 
+    factors: factors || {},
+    price: priceData.price,
+    tvl: tvlData.total,
+    protocols: tvlData.protocols || 0,
+    timestamp: Date.now() 
+  };
 };
+
+// Obtener dirección del Data Feed por defecto según la red
+function getDefaultDataFeedAddress(chainSelectorName: string): string {
+  // Sepolia ETH/USD Data Feed
+  if (chainSelectorName.includes("sepolia")) {
+    return "0x694AA1769357215DE4FAC081bf1f309aDC325306";
+  }
+  // Mainnet ETH/USD Data Feed
+  if (chainSelectorName.includes("mainnet") || chainSelectorName.includes("ethereum-mainnet")) {
+    return "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419";
+  }
+  // Por defecto Sepolia
+  return "0x694AA1769357215DE4FAC081bf1f309aDC325306";
+}
 
 const initWorkflow = (config: Config) => {
   const cron = new cre.capabilities.CronCapability();

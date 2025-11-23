@@ -218,8 +218,14 @@ export default function Home() {
                     )}
                     {data.tvl !== undefined && (
                       <p>
-                        <span className="font-medium">TVL:</span>{" "}
+                        <span className="font-medium">TVL Total (DeFiLlama):</span>{" "}
                         ${data.tvl.toLocaleString()} USD
+                      </p>
+                    )}
+                    {data.protocols !== undefined && (
+                      <p>
+                        <span className="font-medium">Protocolos activos:</span>{" "}
+                        {data.protocols}
                       </p>
                     )}
                     {data.volume && (

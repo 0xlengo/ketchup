@@ -5,10 +5,13 @@ MVP para hackathon que utiliza Chainlink CRE (Compute Runtime Environment) para 
 ## 📋 Descripción del Proyecto
 
 DeFi Risk Oracle es un sistema que:
-- Obtiene datos de precio y TVL de APIs externas (CoinGecko, Llama.fi) usando consenso distribuido
+- **Obtiene precios desde Chainlink Data Feeds** (oráculos descentralizados on-chain)
+- **Obtiene datos de TVL desde DeFiLlama** (API confiable de datos DeFi)
 - Utiliza OpenAI GPT-4o-mini para analizar y evaluar el riesgo (0-100)
 - Actualiza un smart contract en la blockchain con el score de riesgo y la razón
 - Proporciona una interfaz web en tiempo real para consultar y ejecutar evaluaciones
+
+**🔗 Integración Completa**: Usa Chainlink CRE para ejecución, Chainlink Data Feeds para precios, y DeFiLlama para datos de TVL, garantizando datos confiables y actualizados.
 
 ## 🏗️ Estructura del Proyecto
 
@@ -199,10 +202,20 @@ Ver el diagrama completo en [`docs/WORKFLOW_FLOW.md`](./docs/WORKFLOW_FLOW.md)
 ### Resumen del Flujo:
 
 1. **Trigger**: Cron schedule ejecuta el workflow periódicamente
-2. **Obtención de Datos**: Múltiples APIs (CoinGecko, Llama.fi) con consenso distribuido
+2. **Obtención de Datos**:
+   - **Precio**: **Chainlink Data Feed** (lectura on-chain directa) - ETH/USD
+   - **TVL**: Llama.fi API con consenso distribuido CRE
 3. **Evaluación**: OpenAI GPT-4o-mini analiza los datos y genera score (0-100)
 4. **On-Chain**: Escribe el resultado al contrato `RiskOracle` en Sepolia
 5. **Frontend**: Muestra resultados en tiempo real con interfaz visual
+
+### 🔗 Integración Chainlink Completa
+
+- **Chainlink CRE**: Para ejecución del workflow
+- **Chainlink Data Feeds**: Para precios confiables on-chain
+- **Consenso Distribuido**: Múltiples nodos para mayor confiabilidad
+
+Ver más detalles en [`docs/CHAINLINK_DATA_FEEDS.md`](./docs/CHAINLINK_DATA_FEEDS.md)
 
 ## 📦 Dependencias Principales
 
@@ -231,16 +244,33 @@ Ver el diagrama completo en [`docs/WORKFLOW_FLOW.md`](./docs/WORKFLOW_FLOW.md)
 - Asegúrate de configurar las variables de entorno necesarias
 - Nunca commitees el archivo `.env` con claves reales
 
+## 💼 Casos de Uso y Valor
+
+Este proyecto es útil para:
+
+- **Protocolos DeFi**: Mostrar score de riesgo para generar confianza
+- **Wallets**: Alertar usuarios sobre protocolos riesgosos
+- **Plataformas de Lending**: Decidir ratios de colateral automáticamente
+- **Agregadores**: Ranking de protocolos por seguridad
+- **Seguros DeFi**: Pricing dinámico basado en riesgo
+- **DAOs**: Evaluar protocolos antes de invertir
+
+Ver documentación detallada:
+- [`docs/USE_CASES.md`](./docs/USE_CASES.md) - Casos de uso detallados
+- [`docs/BUSINESS_VALUE.md`](./docs/BUSINESS_VALUE.md) - Valor de negocio y monetización
+
 ## 🚧 Próximos Pasos
 
 1. ✅ Tests unitarios completos
 2. ✅ Diagrama de flujo visual
 3. ✅ Prompts mejorados para LLM
 4. ✅ Integración frontend en tiempo real
-5. ⏳ Integrar con workflow CRE desplegado (en lugar de simulación)
-6. ⏳ Agregar WebSocket para actualizaciones en tiempo real
-7. ⏳ Historial de evaluaciones
-8. ⏳ Alertas cuando el score cambia significativamente
+5. ✅ Integración con Chainlink Data Feeds
+6. ⏳ Integrar con workflow CRE desplegado (en lugar de simulación)
+7. ⏳ Agregar WebSocket para actualizaciones en tiempo real
+8. ⏳ Historial de evaluaciones
+9. ⏳ Alertas cuando el score cambia significativamente
+10. ⏳ Evaluación de múltiples protocolos simultáneamente
 
 ## 📄 Licencia
 

@@ -23,18 +23,27 @@
         │                  │                  │
         ▼                  ▼                  ▼
 ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│  Precio ETH  │  │     TVL      │  │   Volumen    │
-│  CoinGecko   │  │  Llama.fi    │  │  CoinGecko   │
+│  Precio ETH  │  │     TVL      │  │   (Opcional) │
+│ Chainlink    │  │  Llama.fi    │  │              │
+│ Data Feed    │  │  (HTTP API)  │  │              │
+│  (On-Chain)  │  │              │  │              │
 └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
        │                 │                 │
-       └─────────────────┼─────────────────┘
+       │                 │                 │
+       │                 ▼                 │
+       │      ┌──────────────────────┐    │
+       │      │ CONSENSO DISTRIBUIDO │    │
+       │      │ (CRE para TVL)       │    │
+       │      └──────────┬───────────┘    │
+       │                 │                │
+       └─────────────────┼────────────────┘
                          │
                          ▼
         ┌──────────────────────────────────────┐
-        │   CONSENSO DISTRIBUIDO (CRE)         │
-        │   - Múltiples nodos obtienen datos   │
-        │   - Agregación por mediana           │
-        │   - Mayor confiabilidad              │
+        │   DATOS AGRUPADOS                    │
+        │   - Precio: Chainlink Data Feed      │
+        │   - TVL: Consenso HTTP (mediana)     │
+        │   - Datos verificables on-chain      │
         └──────────────────┬───────────────────┘
                            │
                            ▼
@@ -115,10 +124,10 @@
 - **Tipo**: `CronCapability` de CRE
 
 ### 2. Obtención de Datos
-- **Precio**: CoinGecko API (ETH/USD)
-- **TVL**: Llama.fi API (Total Value Locked)
-- **Volumen**: CoinGecko API (24h trading volume)
-- **Consenso**: Múltiples nodos CRE obtienen datos y se agregan por mediana
+- **Precio**: **Chainlink Data Feed** (ETH/USD) - Lectura on-chain directa del contrato AggregatorV3Interface
+- **TVL**: Llama.fi API (Total Value Locked) - Con consenso distribuido CRE
+- **Consenso**: Múltiples nodos CRE obtienen datos y se agregan por mediana (solo para TVL)
+- **Ventaja**: Precio viene directamente de Chainlink Data Feed, garantizando confiabilidad y descentralización
 
 ### 3. Evaluación de Riesgo
 
